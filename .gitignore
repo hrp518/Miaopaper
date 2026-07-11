@@ -1,0 +1,4 @@
+# Build outputs
+Firmware/out/
+Firmware/build.log
+Firmware/build_*.txt

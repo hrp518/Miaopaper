@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiaoPaper – 喵喵机 E1 电子书控制台</title>
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #c9d1d9; --text2: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --orange: #d2991d;
+  --btn: #21262d; --btn-hover: #30363d;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);max-width:700px;margin:0 auto;padding:16px}
+h2{font-size:16px;color:var(--accent);margin:16px 0 8px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+h3{font-size:14px;margin:12px 0 4px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;margin:8px 0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.col{flex:1;min-width:200px}
+input,select,button,textarea{font:inherit;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--btn);color:var(--text);outline:none}
+input:focus,select:focus{border-color:var(--accent)}
+button{cursor:pointer;transition:.15s}
+button:hover{background:var(--btn-hover)}
+button.primary{background:#238636;border-color:#238636;color:#fff}
+button.primary:hover{background:#2ea043}
+button.danger{background:#da3633;border-color:#da3633;color:#fff}
+button.warn{background:#9e6a03;border-color:#9e6a03;color:#fff}
+label{font-size:12px;color:var(--text2)}
+.status{display:flex;align-items:center;gap:8px;padding:8px 0}
+.status-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.connected{background:var(--green)}
+.disconnected{background:var(--red)}
+.log{background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:8px;font:12px monospace;color:var(--text2);max-height:200px;overflow-y:auto;white-space:pre-wrap}
+.progress{width:100%;height:6px;border-radius:3px;appearance:none;background:var(--border)}
+.progress::-webkit-progress-bar{background:var(--border);border-radius:3px}
+.progress::-webkit-progress-value{background:var(--accent);border-radius:3px}
+.bar-g{height:6px;border-radius:3px;background:var(--border);overflow:hidden}
+.bar-f{height:100%;border-radius:3px;transition:.3s}
+.editor{position:relative;width:500px;height:280px;margin:8px auto;background:#000;border:1px solid var(--border);overflow:hidden;cursor:grab;user-select:none}
+.editor canvas{display:block}
+.crop-overlay{position:absolute;top:64px;left:125px;width:250px;height:128px;border:2px dashed #0f0;pointer-events:none;box-shadow:0 0 0 9999px rgba(0,0,0,0.55)}
+.thumb{image-rendering:pixelated;border:1px solid var(--border);margin:4px auto;display:block}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{color:var(--text2);text-align:left;padding:3px 6px;border-bottom:1px solid var(--border)}
+td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
+.fade{color:var(--text2);font-size:11px}
+</style>
+</head>
+<body>
+
+<h2 style="display:flex;align-items:center;gap:8px">
+  <span>📖 MiaoPaper</span>
+  <span style="flex:1"></span>
+  <span class="status-dot disconnected" id="led"></span>
+  <span class="fade" id="statusText">未连接</span>
+</h2>
+
+<div class="row">
+  <button class="primary" id="btnConnect" onclick="doConnect()">Connect</button>
+  <button onclick="doDisconnect()">Disconnect</button>
+  <span class="fade" id="devName"></span>
+</div>
+
+<!-- ========== 1. Firmware ========== -->
+<h3>📦 固件升级</h3>
+<div class="card">
+  <div class="row">
+    <input type="file" accept=".bin" id="fwFile" style="flex:1">
+    <button class="primary" onclick="fwSend()">刷入</button>
+  </div>
+  <textarea id="fwCmd" rows="3" style="width:100%;margin-top:4px" placeholder="Command log..."></textarea>
+</div>
+
+<!-- ========== 2. Lock Screen ========== -->
+<h3>🖼 锁屏图片</h3>
+<div class="card">
+  <p class="fade" style="margin:0 0 4px">拖拽定位 · 滚轮缩放 · 选算法 · 预览 · 发送</p>
+  <div class="editor" id="editorWrap">
+    <canvas id="editCanvas" width="500" height="256"></canvas>
+    <div class="crop-overlay"></div>
+  </div>
+  <div class="row" style="margin-top:6px">
+    <input type="file" accept="image/*" id="imgFile" onchange="imgLoad(this)" style="flex:1">
+    <select id="imgMethod">
+      <option value="threshold">Threshold</option>
+      <option value="floyd" selected>Floyd-Steinberg</option>
+      <option value="atkinson">Atkinson</option>
+      <option value="ordered">Bayer</option>
+    </select>
+    <button onclick="imgPreview()">预览</button>
+    <button class="warn" onclick="imgSend()">发送到设备</button>
+  </div>
+  <canvas id="imgThumb" class="thumb" width="250" height="128"></canvas>
+  <span class="fade" id="imgStatus"></span>
+  <details style="margin-top:6px">
+    <summary class="fade" style="font-size:12px;cursor:pointer">🔧 调试：上传字节 vs 设备回读字节</summary>
+    <div class="fade" style="font-size:11px;margin-top:4px;max-width:600px">
+      点"对比字节"会比较网页打包的 <code>lres</code>(上传内容) 与从设备回读的
+      <code>lockBuf</code>，统计首处不一致的位置、前16个差异字节，以及匹配率。
+      上传/回读各显示前32字节十六进制。
+    </div>
+    <div class="row" style="margin-top:4px">
+      <button onclick="loadLockImg()">读取设备图(0x33)</button>
+      <button onclick="imgDebugCompare()">对比字节</button>
+      <span class="fade" id="imgDebugStat" style="font-size:11px"></span>
+    </div>
+    <canvas id="imgDevCanvas" class="thumb" width="250" height="128" style="display:none"></canvas>
+    <pre id="imgDebugHex" style="font-size:10px;color:#8b949e;max-width:600px;overflow:auto;white-space:pre-wrap"></pre>
+  </details>
+</div>
+
+<!-- ========== 3. E-Book ========== -->
+<h3>📚 电子书</h3>
+<div class="card">
+  <div class="row" style="margin-bottom:4px">
+    <span id="flashStat" class="fade">检测中...</span>
+  </div>
+  <div class="row">
+    <div class="col">
+      <label>中文字库 (选传)</label>
+      <div class="row">
+        <input type="file" accept=".bin" id="fontFile" style="flex:1">
+        <button onclick="fontUpload()">上传字库</button>
+      </div>
+      <progress class="progress" id="fontBar" value="0" max="100" style="display:none"></progress>
+      <span class="fade" id="fontStat"></span>
+    </div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div class="col">
+      <label>上传书籍</label>
+      <div class="row">
+        <input placeholder="书名" id="bookName" style="width:140px">
+        <select id="bookEnc"><option value="0">ASCII</option><option value="1" selected>GB2312</option></select>
+        <input type="file" accept=".txt,.bin" id="bookFile" style="flex:1">
+      </div>
+      <div class="row" style="margin-top:2px">
+        <button class="primary" onclick="bookUpload()">上传</button>
+        <progress class="progress" id="bookBar" value="0" max="100" style="flex:1;display:none"></progress>
+      </div>
+      <span class="fade" id="bookStat"></span>
+    </div>
+  </div>
+  <div style="margin-top:8px">
+    <div class="row">
+      <span class="fade" style="flex:1">书籍列表</span>
+      <button onclick="bookList()">刷新</button>
+    </div>
+    <div id="bookTable"></div>
+    <div id="flashBar" style="margin-top:4px"></div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <span class="fade">阅读控制: </span>
+    <button onclick="sendCmd(new Uint8Array([0x21]))">退出</button>
+    <span class="fade" style="font-size:11px">时钟: L设置/R书单 阅读F下一页/F双击上一页/L上一页/R下一页 长按F锁屏 长按R退出</span>
+  </div>
+</div>
+
+<!-- ========== 设置 ========== -->
+<h3>⚙️ 设置</h3>
+<div class="card">
+  <div class="row">
+    <label><input type="checkbox" id="setBle"> 蓝牙广播 (关闭后重启可恢复连接)</label>
+  </div>
+  <div class="row">
+    <label>休眠时间:
+      <select id="setSleep">
+        <option value="0">15 秒</option>
+        <option value="1">30 秒</option>
+        <option value="2">60 秒</option>
+        <option value="3">120 秒</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <span class="fade">固件版本: <b id="setFw">-</b></span>
+    <button onclick="saveSettings()">保存设置</button>
+    <button onclick="loadSettings()">刷新</button>
+  </div>
+</div>
+
+<!-- ========== 分辨率调试 ========== -->
+<h3>📐 分辨率调试</h3>
+<div class="card">
+  <div class="row">
+    <label>Y 值 (0-127):
+      <input type="number" id="dbgY" min="0" max="127" value="64" style="width:60px">
+    </label>
+    <button onclick="dbgDrawLine()">画水平线</button>
+    <button onclick="dbgExit()">退出调试</button>
+  </div>
+  <span class="fade" id="dbgStat" style="font-size:11px"></span>
+  <span class="fade" style="font-size:11px;display:block;margin-top:4px">每次画线前自动清屏白底，慢刷(全GC 0xF7)。退出后回到时钟。</span>
+</div>
+<!-- ========== Flash 诊断（定位上传失败） ========== -->
+<h3>🔬 Flash 诊断</h3>
+<div class="card">
+  <p class="fade" style="margin:0 0 4px">用于排查上传图片/图书无效：确认外挂 SPI Flash 是否应答、锁屏图扇区/标志位实际内容、写功能是否正常。结果输出到下方串口终端 [RxTx] 行。</p>
+  <div class="row">
+    <button onclick="flashDiagJedec()">读 JEDEC ID (0xF3)</button>
+    <button onclick="flashDiagRead()">读锁屏图扇区</button>
+    <button onclick="flashDiagSelfTest()">写自测 (0xF5)</button>
+  </div>
+  <div class="row" style="margin-top:4px">
+    <label>地址(HEX): <input id="dbgFlashAddr" value="7FF000" style="width:90px"></label>
+    <button onclick="flashDiagReadAddr()">读指定地址(0xF4)</button>
+    <span class="fade">结果见终端 [RxTx]</span>
+  </div>
+  <span class="fade" id="flashDiagStat" style="font-size:11px"></span>
+</div>
+
+<!-- ========== PC1 充电状态测试 ========== -->
+<h3>🔌 PC1 充电状态测试</h3>
+<div class="card">
+  <div class="row">
+    <button onclick="pc1Test(0x42)">弱下拉(100K)</button>
+    <button onclick="pc1Test(0x43)">强下拉(输出低)</button>
+    <button onclick="pc1Test(0x44)">高阻</button>
+  </div>
+  <span class="fade" id="pc1Stat" style="font-size:11px"></span>
+</div>
+
+<!-- ========== 4. Terminal ========== -->
+<h3>💬 串口终端</h3>
+<div class="card">
+  <div class="row" style="margin-bottom:4px">
+    <input placeholder="发送 HEX 或文本..." id="termIn" style="flex:1" onkeypress="if(event.key==='Enter')termSend()">
+    <button onclick="termSend()">发送</button>
+    <select id="termFmt"><option value="hex">HEX</option><option value="text">文本</option></select>
+    <button onclick="document.getElementById('termOut').innerHTML=''">清空</button>
+    <label><input type="checkbox" id="termAutoScroll" checked>自动滚动</label>
+  </div>
+  <div class="log" id="termOut"></div>
+  <div class="row" style="margin-top:4px">
+    <span class="fade" style="margin-left:8px">EPD:</span>
+    <button onclick="rxTx(hexToBytes('E7'))">仅Init</button>
+    <button onclick="rxTx(hexToBytes('E5'))">局Init</button>
+    <button onclick="rxTx(hexToBytes('E6'))">局刷(当前屏)</button>
+    <button onclick="eepromSendE8()">局刷(写底图)</button>
+    <button onclick="rxTx(hexToBytes('E2'))">强制刷新</button>
+    <button onclick="rxTx(hexToBytes('EF'))">分辨率测试</button>
+    <span class="fade" style="margin-left:8px">按键扫描:</span>
+    <button onclick="rxTx(hexToBytes('ED01'))">开</button>
+    <button onclick="rxTx(hexToBytes('ED00'))">关</button>
+  </div>
+</div>
+
+<script src="web_tools/js/gb2312_codec.js"></script>
+<script>
+// ==================== BLE ====================
+var dev=null, gatt=null, wrChar=null, rxChar=null, conn=false;
+
+/* A long-running device operation is in progress (firmware flash, book / font
+ * / lock-image upload).  While busy, every other interactive button in the
+ * page is disabled so that no second command can collide with the in-flight
+ * transfer over the shared OTA characteristic. */
+var busy=false;
+function setBusy(b){
+  busy=!!b;
+  var bs=document.getElementsByTagName('button');
+  for(var i=0;i<bs.length;i++){
+    var el=bs[i];
+    if(el.id=='btnConnect')continue;  // keep Connect/Disconnect usable
+    el.disabled=busy;
+    el.style.opacity=busy?0.4:'';
+    el.style.cursor=busy?'not-allowed':'';
+  }
+}
+
+function log(s){var d=new Date();var el=document.getElementById('termOut');el.textContent+=('['+d.toTimeString().slice(0,8)+'] '+s+'\n');var auto=document.getElementById('termAutoScroll');if(!auto||auto.checked)el.scrollTop=el.scrollHeight}
+function setStatus(c, t){var d=document.getElementById('led');var s=document.getElementById('statusText');d.className='status-dot '+(c?'connected':'disconnected');s.textContent=t}
+
+function doConnect(){
+  if(conn){doDisconnect();return}
+  navigator.bluetooth.requestDevice({
+    // 蓝牙广播名 MPP_XXXXXX（见固件 ble.c）
+    filters:[{namePrefix:'MPP'}],
+    optionalServices:['0000221f-0000-1000-8000-00805f9b34fb','00001f10-0000-1000-8000-00805f9b34fb']
+  }).then(d=>{
+    d.addEventListener('gattserverdisconnected',onDisconnect);
+    dev=d;document.getElementById('devName').textContent=d.name;
+    return d.gatt.connect()
+  }).then(s=>{
+    gatt=s;log('GATT connected');
+    if(typeof gatt.requestMTU==='function'){
+      log('Android: 请求 MTU 247...');
+      return gatt.requestMTU(247).then(()=>gatt);
+    }
+    log('Windows: 等待设备主动协商 MTU（约 0.5s）...');
+    return gatt;
+  }).then(s=>{
+    return gatt.getPrimaryService('0000221f-0000-1000-8000-00805f9b34fb')
+  }).then(sv=>sv.getCharacteristic('0000331f-0000-1000-8000-00805f9b34fb'))
+  .then(ch=>{
+    wrChar=ch;document.getElementById('btnConnect').textContent='Disconnect';
+    refreshPayloadMax();
+    logPayloadMax('初始');
+    pollPayloadMax(10,500);
+    return wrChar.startNotifications()
+  }).then(()=>{
+    wrChar.addEventListener('characteristicvaluechanged',e=>onNotify(e.target.value));
+    return setupRxTx()
+  }).then(()=>{
+    conn=true;setStatus(true,'已连接');
+    setTimeout(function(){setTime();queryStatus();bookList();pollPayloadMax(6,1000)},2000);
+  }).catch(e=>{log('Connect err: '+e);onDisconnect()})
+}
+
+function onDisconnect(){
+  conn=false;wrChar=null;rxChar=null;
+  setStatus(false,'断开');
+  document.getElementById('btnConnect').textContent='Connect';
+}
+
+function setupRxTx(){
+  return gatt.getPrimaryService('00001f10-0000-1000-8000-00805f9b34fb')
+    .then(sv=>sv.getCharacteristic('00001f1f-0000-1000-8000-00805f9b34fb'))
+    .then(ch=>{rxChar=ch;return rxChar.startNotifications()})
+    .then(()=>{rxChar.addEventListener('characteristicvaluechanged',e=>onRx(e.target.value))})
+}
+
+function doDisconnect(){if(dev&&dev.gatt.connected)dev.gatt.disconnect();conn=false;onDisconnect()}
+
+// ==================== Commands ====================
+// Effective payload cap = MTU - 3 (ATT header).  Falls back to 20 (default
+// MTU 23) until a larger MTU is negotiated, then becomes 244 (MTU 247).
+var blePayloadMax = 20;
+function refreshPayloadMax(){
+  if(wrChar && typeof wrChar.maxWriteValueLength==='function'){
+    try{ var m=wrChar.maxWriteValueLength(); if(m>0) blePayloadMax=m; }catch(e){}
+  }
+}
+function logPayloadMax(tag){
+  var note=blePayloadMax<=20?' (默认MTU，慢)':' (大MTU，快)';
+  log((tag?tag+': ':'')+'payload max = '+blePayloadMax+' bytes'+note);
+}
+function pollPayloadMax(retries,delayMs){
+  refreshPayloadMax();
+  logPayloadMax('连接');
+  if(blePayloadMax>20){
+    log('MTU 已协商，上传速度应明显提升');
+    return;
+  }
+  if(retries<=0){
+    log('MTU 仍为 20：设备可能未协商成功，或浏览器不支持大 MTU');
+    return;
+  }
+  setTimeout(function(){pollPayloadMax(retries-1,delayMs)},delayMs);
+}
+
+async function sendCmd(data){
+  if(!wrChar){log('未连接');return}
+  await wrChar.writeValue(data)
+}
+async function sendCmdFast(data){
+  // write-without-response: fast, and `await` waits for the link-layer
+  // enqueue so back-to-back calls are throttled by the controller (no drops).
+  if(!wrChar){log('未连接');return}
+  await wrChar.writeValueWithoutResponse(data)
+}
+async function rxTx(data){
+  if(!rxChar){log('未连接');return}
+  await rxChar.writeValue(data)
+}
+
+// ==================== Notify ====================
+function onNotify(data){
+  var b=new Uint8Array(data.buffer);
+  if(b.length>0&&b[0]==0x19){statusNotify(b);return}
+  if(b.length>0&&b[0]==0x33){lockImgNotify(b);return}
+  if(b.length>0&&b[0]==0x34){settingsNotify(b);return}
+  if(b.length>0&&b[0]==0x35){if(ebookCB==0x35){ebookResolve(b);ebookCB=null}return}
+  // Lock-image upload acks (0x30 begin / 0x31 data / 0x32 end) flow through
+  // the same ebookCB/ebookResolve waiter so the uploader can throttle one
+  // chunk at a time -> no write-without-response packet loss.
+  if(b.length>1&&(b[0]==0x30||b[0]==0x31||b[0]==0x32)){if(ebookCB==b[0]){ebookResolve(b);ebookCB=null}return}
+  // Debug tool acks (0x40 draw / 0x41 exit) resolve the waiter.
+  if(b.length>0&&(b[0]==0x40||b[0]==0x41||b[0]==0x42||b[0]==0x43||b[0]==0x44)){if(ebookCB==b[0]){ebookResolve(b);ebookCB=null}return}
+  if(b.length>0&&b[0]>=0x10&&b[0]<=0x35){ebookNotify(b);return}
+  try{var t=new TextDecoder().decode(b);if(/^[ -~\n\r\t]*$/.test(t))log('[OTA] '+t.trim())}catch(e){}
+}
+
+var ebookCB=null, ebookResolve=null;
+var entries=[], entryCount=0;
+var listEntryTimer=null;
+
+function onRx(data){
+  var b=new Uint8Array(data.buffer);
+  try{var t=new TextDecoder().decode(b);if(/^[ -~\n\r\t]*$/.test(t))log('[RxTx] '+t.trim())}catch(e){}
+}
+
+function ebookWait(cmd,ms){
+  return new Promise((resolve,reject)=>{
+    ebookCB=cmd;ebookResolve=resolve;setTimeout(()=>{
+      if(ebookCB==cmd){
+        ebookCB=null;
+        if(cmd==0x14&&listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}
+        reject(new Error('timeout'))
+      }
+    },ms)
+  })
+}
+
+// Bytes the firmware reports it has committed to flash (from 0x11/0x17 notify).
+// The windowed uploader uses this as flow control: it keeps sending while
+// (sent - acked) < WINDOW, and waits (letting the controller drain) when the
+// in-flight window is full.  Because this is a monotonic counter reported by
+// the firmware, losing an occasional notify only delays the ack, never corrupts
+// data (the next notify carries the up-to-date cumulative count).
+var fwWritten=0;
+function ebookNotify(b){
+  var cmd=b[0];
+  if(cmd==0x10&&b.length>=3){if(ebookCB==0x10){ebookResolve(b);ebookCB=null}}
+  else if(cmd==0x12&&b.length>=6){if(ebookCB==0x12){ebookResolve(b);ebookCB=null}}
+  else if(cmd==0x14&&b.length>=2){
+    entryCount=b[1];entries=[];
+    if(entryCount==0&&ebookCB==0x14){if(listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}ebookResolve([]);ebookCB=null}
+    else if(ebookCB==0x14){
+      if(listEntryTimer)clearTimeout(listEntryTimer);
+      listEntryTimer=setTimeout(function(){
+        if(ebookCB==0x14){log('书单部分到达 '+entries.length+'/'+entryCount);ebookResolve(entries.slice());ebookCB=null;listEntryTimer=null}
+      },4000);
+    }}
+  else if(cmd==0x15&&b.length>=25){
+    var idx=b[1],tb=b.slice(2,22),enc=b[25]!=null?b[25]:0;
+    var t=typeof catalogTitleFromNotify==='function'?catalogTitleFromNotify(tb,enc):'';
+    if(!t){for(var i=0;i<tb.length&&tb[i];i++)t+=String.fromCharCode(tb[i]);}
+    var len=(b[22]<<16)|(b[23]<<8)|b[24];entries.push({idx:idx,title:t,len:len,enc:enc});
+    if(entries.length>=entryCount&&ebookCB==0x14){if(listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}ebookResolve(entries);ebookCB=null}}
+  else if((cmd==0x11||cmd==0x17)&&b.length>=4){
+    var w=(b[1]<<16)|(b[2]<<8)|b[3];
+    if(w>fwWritten)fwWritten=w;          // monotonic high-water mark
+    if(cmd==0x17){setFontStat('已写: '+w+' B');var p=document.getElementById('fontBar');if(p&&p.style.display!='none'){p.value=Math.min(p.max,w)}}
+  }
+  else if(cmd==0x18&&b.length>=2){if(ebookCB==0x18){ebookResolve(b);ebookCB=null}}
+  else if(cmd==0x20&&b.length>=2){if(ebookCB==0x20){ebookResolve(b);ebookCB=null}}
+  else if(cmd==0x13&&b.length>=2){if(ebookCB==0x13){ebookResolve(b);ebookCB=null}}
+  else if(cmd==0x1A&&b.length>=2){if(ebookCB==0x1A){ebookResolve(b);ebookCB=null}}
+}
+
+function statusNotify(b){
+  if(b.length<4)return;
+  var fontOk=b[1]?1:0,bookCnt=b[2],lockOk=b[3]?1:0;
+  var devMtu=b.length>=5?b[4]:0;
+  var f=fontOk?'<span style="color:#3fb950">✔ 字库已安装</span>':'<span style="color:#f85149">✘ 未安装</span>';
+  var bk=bookCnt>0?'<span style="color:#3fb950">'+bookCnt+' 本书</span>':'<span style="color:#f85149">无书</span>';
+  var lk=lockOk?'<span style="color:#3fb950">✔ 锁屏图</span>':'<span style="color:#8b949e">无锁屏图</span>';
+  var mtuInfo=devMtu?(' &nbsp;|&nbsp; 设备ATT MTU='+devMtu):'';
+  document.getElementById('flashStat').innerHTML=f+' &nbsp;|&nbsp; '+bk+' &nbsp;|&nbsp; '+lk+mtuInfo;
+  if(devMtu)log('设备 ATT MTU='+devMtu+'，浏览器 payload max='+blePayloadMax);
+  if(devMtu>23&&blePayloadMax<=20){
+    log('⚠ Windows Chrome 无法使用大 MTU（payload 仍=20），上传会很慢。请用 web_tools/mpp_upload.py（bleak）或 Android Chrome。');
+  }else if(devMtu<=23&&blePayloadMax<=20){
+    log('⚠ 设备 MTU 未协商成功：请烧录最新 MiaoPaper 固件，连接后等 ≥3s 再查 [RxTx] 是否有 MTU req/MTU eff=247');
+  }
+  if(lockOk)loadLockImg();
+  loadSettings();
+}
+
+// ==================== Lock image read-back (bidirectional display) ====================
+var lockBuf=new Uint8Array(4000), lockRecv=0;
+// Debug tracking for 0x33 read-back
+var lockDbgPackets=0, lockDbgBytes=0, lockDbgLastOff=-1, lockDbgLog=[];
+function lockDbg(s){lockDbgLog.push(s);if(lockDbgLog.length>40)lockDbgLog.shift();}
+// Request-response read-back: the web page asks for ONE 160-byte chunk at a
+// time ([0x33][off_hi][off_lo]) and awaits the firmware's single reply before
+// requesting the next.  This never drops a packet (the old "blast all 23
+// notifications" stream lost ~3/23 because the BLE notify queue is shallow).
+var lockChunkSz=160;
+var lockReadCB=null, lockReadResolve=null, lockReadReject=null;
+var lockReading=false;  // guard against concurrent loadLockImg() calls
+function lockReadWait(ms){return new Promise(function(res,rej){lockReadCB=true;lockReadResolve=res;lockReadReject=rej;setTimeout(function(){if(lockReadCB){lockReadCB=null;lockReadReject(new Error('chunk timeout'))}},ms)})}
+async function loadLockImg(){
+  if(lockReading){lockDbg('loadLockImg: 已有读取进行中，跳过');return}
+  lockReading=true;
+  try{await _loadLockImgOnce()}finally{lockReading=false}
+}
+async function _loadLockImgOnce(){
+  lockRecv=0;lockDbgPackets=0;lockDbgBytes=0;lockDbgLastOff=-1;lockDbgLog=[];
+  lockBuf.fill(0);
+  var s=document.getElementById('imgStatus');
+  for(var off=0;off<4000;off+=lockChunkSz){
+    try{
+      var ew=lockReadWait(2000);
+      await sendCmd(new Uint8Array([0x33,(off>>8)&0xff,off&0xff]));
+      var b=await ew;  // [0x33][off_hi][off_lo][data...]
+      if(b.length<3){lockDbg('chunk off='+off+' 短包 len='+b.length);break}
+      var roff=(b[1]<<8)|b[2],dlen=b.length-3;
+      lockBuf.set(b.subarray(3,3+dlen),roff);
+      lockRecv+=dlen;lockDbgBytes+=dlen;lockDbgPackets++;
+      if(roff!=off)lockDbg('chunk 期望'+off+' 得'+roff+' (偏移不符)');
+      lockDbgLastOff=roff+dlen;
+    }catch(e){lockDbg('chunk off='+off+' 失败: '+e.message);s.textContent='回读失败@'+off+': '+e.message;return}
+    s.textContent='回读 '+Math.min(off+lockChunkSz,4000)+'/4000';
+  }
+  if(lockRecv>=4000){paintLockFromDevice();lockDbg('loadLockImg 完整 ('+lockDbgPackets+' chunks)')}
+  else{s.textContent='回读缺字节 '+(4000-lockRecv)}
+}
+// Legacy notification handler -- still used by imgDebugCompare / statusNotify
+// callers that may receive a stray 0x33 packet.  In request-response mode the
+// per-chunk reply is consumed by lockReadResolve, so this only fires for the
+// legacy blast-stream or out-of-band packets.
+function lockImgNotify(b){
+  if(b.length<2){return;}
+  lockDbgPackets++;
+  if(b.length==2&&b[1]==0xFB){lockDbg('legacy: 心跳 0xFB');return;}
+  if(b.length==3&&b[1]==0xFC){lockDbg('legacy: 标志位 0xFC, flag=0x'+b[2].toString(16)+(b[2]==0xAA?' (有效!)':' (无效/无图)'));return;}
+  if(b.length==2&&b[1]==0xFE){lockDbg('legacy: 0xFE 无锁屏图');document.getElementById('imgStatus').textContent='设备无锁屏图';return;}
+  if(b.length>=3&&b[1]==0xFF&&b[2]==0xFF){lockDbg('legacy: END 包');return;}
+  if(b.length<3){return;}
+  // Request-response chunk reply: resolve the pending waiter.
+  if(lockReadCB){var r=lockReadResolve;lockReadCB=null;lockReadResolve=null;r(b);return}
+  // Otherwise (legacy stream) store into lockBuf.
+  var off=(b[1]<<8)|b[2],dlen=b.length-3;
+  if(off+dlen>4000){return;}
+  lockBuf.set(b.subarray(3,3+dlen),off);
+  lockDbgBytes+=dlen;
+  lockDbgLastOff=off+dlen;
+  lockRecv=Math.max(lockRecv,off+dlen);
+}
+// Paint the received 4000-byte buffer back into the preview, reversing the
+// firmware epd_temp format: byte=(y_byte*250)+x, bit(y&7) LSB=top, black=1.
+function paintLockFromDevice(){
+  lres=new Uint8Array(4000);lres.set(lockBuf);
+  var pc=document.getElementById('imgThumb'),pctx=pc.getContext('2d'),pd=pctx.createImageData(250,128);
+  for(var x=0;x<250;x++){
+    for(var y=0;y<128;y++){
+      var black=(lres[((y>>3)*250)+x]>>(y&7))&1;
+      var v=black?0:255;
+      var pi=(y*250+x)*4;
+      pd.data[pi]=pd.data[pi+1]=pd.data[pi+2]=v;pd.data[pi+3]=255;
+    }
+  }
+  pctx.putImageData(pd,0,0);
+  document.getElementById('imgStatus').textContent='已载入设备锁屏图';
+}
+
+// Paint the device-returned buffer into a SEPARATE canvas so we can eyeball
+// it next to the upload preview, and dump hex for byte-level comparison.
+function imgDebugCompare(){
+  var hex=document.getElementById('imgDebugHex');
+  var stat=document.getElementById('imgDebugStat');
+  if(!lres){stat.textContent='没有上传数据(先预览)';return}
+  // Run even if incomplete so we can inspect partial data + debug log.
+  var complete=(lockRecv==4000);
+
+  // Render device image into its own canvas (reverse epd_temp format)
+  var dc=document.getElementById('imgDevCanvas');dc.style.display='inline-block';dc.width=250;dc.height=128;
+  var dx=dc.getContext('2d'),dd=dx.createImageData(250,128);
+  for(var x=0;x<250;x++){
+    for(var y=0;y<128;y++){
+      var black=(lockBuf[((y>>3)*250)+x]>>(y&7))&1,v=black?0:255;
+      var pi=(y*250+x)*4;
+      dd.data[pi]=dd.data[pi+1]=dd.data[pi+2]=v;dd.data[pi+3]=255;
+    }
+  }
+  dx.putImageData(dd,0,0);
+
+  // Compare lres (uploaded) vs lockBuf (device) only over received bytes
+  var diffs=0,first=-1,dlist=[],checked=0;
+  for(var i=0;i<lockRecv;i++){
+    checked++;
+    if(lres[i]!==lockBuf[i]){
+      diffs++;
+      if(first<0)first=i;
+      if(dlist.length<16)dlist.push('#'+i+': up='+lres[i].toString(16).padStart(2,'0')+' dev='+lockBuf[i].toString(16).padStart(2,'0'));
+    }
+  }
+  var match=checked?((checked-diffs)/checked*100).toFixed(1):'0';
+  stat.textContent='已收 '+lockRecv+'/4000, 已检 '+checked+'字节, 匹配 '+match+'%, 差异 '+diffs+', 首处@'+first+' (packets='+lockDbgPackets+')';
+
+  function hexRow(label,buf,n,from){var s=label+':';for(var i=0;i<n&&(from+i)<buf.length;i++)s+=' '+buf[from+i].toString(16).padStart(2,'0');return s}
+  hex.textContent=
+    '=== 0x33 回读调试 ===\n'+
+    'lockRecv='+lockRecv+'/4000, packets='+lockDbgPackets+', lastOff='+lockDbgLastOff+'\n'+
+    lockDbgLog.join('\n')+'\n\n'+
+    '=== 字节对比 (仅已收 '+lockRecv+' 字节) ===\n'+
+    '首处差异 @'+first+' (byte index)\n'+
+    '差异样例: '+dlist.join(' | ')+'\n\n'+
+    hexRow('上传前32',lres,32,0)+'\n'+
+    hexRow('设备前32',lockBuf,32,0)+'\n'+
+    (first>=0?(hexRow('上传@first',lres,16,first)+'\n'+hexRow('设备@first',lockBuf,16,first)):'(无差异)');
+}
+
+// ==================== Settings (BLE on/off, sleep timeout, version) ====================
+function loadSettings(){
+  try{sendCmd(new Uint8Array([0x34]))}catch(e){}
+}
+function settingsNotify(b){
+  if(b.length<6)return;
+  var ble=b[1],si=b[2],fw='v'+b[3]+'.'+b[4]+'.'+b[5];
+  var be=document.getElementById('setBle');if(be)be.checked=!!ble;
+  var ss=document.getElementById('setSleep');if(ss){ss.value=String(si)}
+  var fv=document.getElementById('setFw');if(fv)fv.textContent=fw;
+}
+async function saveSettings(){
+  if(busy){log('设备忙');return}
+  var ble=document.getElementById('setBle').checked?1:0;
+  var si=parseInt(document.getElementById('setSleep').value)||2;
+  setBusy(true);
+  try{var ew=ebookWait(0x35,3000);await sendCmd(new Uint8Array([0x35,ble,si]));await ew;log('设置已保存')}catch(e){log('保存超时')}
+  setBusy(false);
+}
+
+// ==================== Resolution debug tool (0x40 draw line / 0x41 exit) ====================
+// Send [0x40][y_hi][y_lo] (big-endian Y). Firmware clears screen to white,
+// draws a full-width black line at Y, does a slow full-GC refresh, and echoes
+// [0x40][0x00][clamped_y] back.
+async function dbgDrawLine(){
+  if(busy){log('设备忙');return}
+  var y=parseInt(document.getElementById('dbgY').value);
+  if(isNaN(y))y=64;
+  if(y<0)y=0; if(y>127)y=127;
+  document.getElementById('dbgStat').textContent='画线 y='+y+' ...';
+  setBusy(true);
+  try{
+    var ew=ebookWait(0x40,5000);
+    await sendCmd(new Uint8Array([0x40,(y>>8)&0xff,y&0xff]));
+    var r=await ew;
+    document.getElementById('dbgStat').textContent='✅ 已画 y='+r[2]+' (设备回显)';
+  }catch(e){document.getElementById('dbgStat').textContent='画线超时/失败';}
+  setBusy(false);
+}
+async function dbgExit(){
+  if(busy){log('设备忙');return}
+  document.getElementById('dbgStat').textContent='退出调试...';
+  setBusy(true);
+  try{var ew=ebookWait(0x41,3000);await sendCmd(new Uint8Array([0x41]));await ew;document.getElementById('dbgStat').textContent='✅ 已退出，回时钟';}catch(e){document.getElementById('dbgStat').textContent='退出超时';}
+  setBusy(false);
+}
+
+// ==================== PC1 charge-status pin test (0x42/0x43/0x44) ====================
+async function pc1Test(cmd){
+  if(busy){log('设备忙');return}
+  var labels={0x42:'弱下拉(100K)',0x43:'强下拉(输出低)',0x44:'高阻'};
+  document.getElementById('pc1Stat').textContent=labels[cmd]+' 读取中...';
+  setBusy(true);
+  try{
+    var ew=ebookWait(cmd,3000);
+    await sendCmd(new Uint8Array([cmd]));
+    var r=await ew;
+    var lvl=r[1]?'高(1)':'低(0)';
+    document.getElementById('pc1Stat').textContent=labels[cmd]+' -> 电平: '+lvl;
+    log('PC1 '+labels[cmd]+' = '+lvl);
+  }catch(e){document.getElementById('pc1Stat').textContent=labels[cmd]+' 超时';}
+  setBusy(false);
+}
+
+// ==================== Time ====================
+function setTime(){
+  var n=new Date();
+  var sec=Math.round(n.getTime()/1000)-n.getTimezoneOffset()*60;
+  var y=n.getFullYear(),mo=n.getMonth()+1,d=n.getDate(),w=n.getDay()||7;
+  var yh=('0000'+y.toString(16)).slice(-4);
+  var cmd='dd'+intToHex4(sec)+yh+byteToHex(mo)+byteToHex(d)+byteToHex(w);
+  rxTx(hexToBytes(cmd));
+}
+
+// ==================== Status query ====================
+async function queryStatus(){
+  try{await sendCmd(new Uint8Array([0x19]))}catch(e){}
+}
+
+// ==================== Windowed bulk upload engine ====================
+// Streams a large buffer (font 256 KB / book up to 7 MB) to the firmware using
+// writeValueWithoutResponse (Write Command) for maximum BLE throughput -- the
+// controller queues several packets per connection event, far faster than the
+// one-round-trip-per-chunk writeValue path.
+//
+// Flow control WITHOUT per-chunk awaits: the firmware notifies [0x11/0x17][written]
+// after every chunk it commits to flash.  We track the cumulative `fwWritten`
+// counter (monotonic, set in ebookNotify) and keep sending while the in-flight
+// window (sent - acked) stays under WINDOW bytes.  When the window fills we
+// yield briefly and re-check; the controller drains its queue and the firmware
+// catches up, advancing fwWritten and reopening the window.  No chunk is ever
+// lost this way: the controller's Rx FIFO is deep (64 packets), and we never
+// let more than WINDOW bytes outrun what the firmware has acknowledged.
+//
+// Robust to dropped notifies: fwWritten is a high-water counter, so a lost
+// notify only delays the ack; the next one carries the up-to-date cumulative
+// total.  If the firmware rejects a chunk (EPD busy) it re-sends the OLD
+// written value, so the window stalls and we detect "no progress" via the
+// stall guard below (which surfaces a real error instead of hanging).
+var UPLOAD_WINDOW=8192;     // max in-flight bytes (≈34 chunks at 243 B); < 64-pkt FIFO
+var UPLOAD_POLL_MS=4;       // yield when window full (short — device batches flash)
+var UPLOAD_STALL_MS=8000;   // no-progress timeout -> abort (don't hang forever)
+
+// Build one data packet: opcode + raw slice.  chunkSz is the data bytes that
+// fit in one Write Command (= blePayloadMax - 1, opcode takes 1 byte).
+function buildUploadPkt(opcode,data,off,chunkSz){
+  var c=data.subarray(off,Math.min(off+chunkSz,data.length));
+  var p=new Uint8Array(1+c.length);p[0]=opcode;p.set(c,1);return p
+}
+
+// Stream `data` with the given data opcode (0x11 book / 0x17 font).  Updates
+// the supplied bar element and stat-string callback.  Throws on stall/abort.
+async function streamUpload(opcode,data,bar,onStat){
+  var chunkSz=Math.max(20,blePayloadMax-1);
+  var total=data.length;
+  var pktWindow=blePayloadMax<=20?48:24;
+  var window=Math.min(UPLOAD_WINDOW,pktWindow*chunkSz);
+  var sent=0;                 // bytes handed to the controller
+  fwWritten=0;                // reset cumulative ack before streaming
+  while(sent<total){
+    // Flow control: if the in-flight window is full, yield until the firmware
+    // acks more.  We do NOT abort on a notify stall here: the firmware's
+    // per-chunk notify is frequently dropped by the shallow BLE notify queue,
+    // so fwWritten can pause even though the firmware is still happily
+    // committing chunks.  The only authoritative completion signal is the
+    // end() command's ack (firmware is single-threaded: it processes all data
+    // before end()).  So we just keep yielding while the window is full; the
+    // hard cap is the await on the write itself (it blocks at the link layer).
+    if(sent-fwWritten>=window){
+      await waitMs(UPLOAD_POLL_MS);
+      continue;
+    }
+    var p=buildUploadPkt(opcode,data,sent,chunkSz);
+    await sendCmdFast(p);                 // writeValueWithoutResponse; paces at link layer
+    sent+=p.length-1;
+    if(bar)bar.value=Math.min(bar.max,sent);
+    if(onStat&&sent%4096<chunkSz)onStat(sent,total);
+  }
+  // Drain: give the firmware a short moment to finish committing the last few
+  // chunks, then proceed to end().  We deliberately do NOT wait for
+  // fwWritten==total: the last notify is the one most likely to be dropped
+  // (nothing follows it to flush the queue), and waiting on it would hang.
+  // end()'s ack is the real "everything is written" confirmation.
+  var drainDeadline=clock_ms()+1500;
+  while(fwWritten<total && clock_ms()<drainDeadline){await waitMs(UPLOAD_POLL_MS)}
+}
+
+function clock_ms(){return Date.now()}
+
+// ==================== Font upload ====================
+function setFontStat(t){document.getElementById('fontStat').textContent=t}
+async function fontUpload(){
+  if(!wrChar){log('未连接');return}
+  if(busy){log('设备忙，请等待当前操作完成');return}
+  var f=document.getElementById('fontFile').files[0];if(!f)return;
+  var b=new Uint8Array(await f.arrayBuffer());
+  setFontStat('准备...');var bar=document.getElementById('fontBar');bar.style.display='block';bar.max=b.length;bar.value=0;
+  var t0=clock_ms();
+  setBusy(true);
+  try{
+    // begin
+    try{await sendCmd(new Uint8Array([0x16,(b.length>>16)&0xff,(b.length>>8)&0xff,b.length&0xff]))}catch(e){setFontStat('begin失败');return}
+    // bulk stream via windowed writeValueWithoutResponse (max throughput)
+    await streamUpload(0x17,b,bar,function(w,tot){setFontStat('上传中 '+w+'/'+tot+' ('+(w*100/tot).toFixed(1)+'%)')});
+    var secs=((clock_ms()-t0)/1000).toFixed(1);
+    try{var ew18=ebookWait(0x18,5000);await sendCmd(new Uint8Array([0x18]));await ew18;setFontStat('✅ 完成 '+b.length+' B / '+secs+'s')}catch(e){setFontStat('end超时')}
+  }catch(e){setFontStat('上传失败: '+(e.message||e));log('fontUpload err: '+e)}
+  finally{setBusy(false);bar.style.display='none'}
+  setTimeout(queryStatus,500)
+}
+
+// Ask firmware to drop ghost catalog slots (no-op on old firmware).
+async function compactCatalog(){
+  try{var ew=ebookWait(0x1A,3000);await sendCmd(new Uint8Array([0x1A]));await ew}catch(e){}
+}
+
+// ==================== Book upload ====================
+function setBookStat(t){document.getElementById('bookStat').textContent=t}
+async function bookUpload(){
+  if(!wrChar){log('未连接');return}
+  if(busy){log('设备忙，请等待当前操作完成');return}
+  var fi=document.getElementById('bookFile').files[0];if(!fi)return;
+  var title=document.getElementById('bookName').value||fi.name;
+  var enc=parseInt(document.getElementById('bookEnc').value);
+  if(typeof catalogTitleEncoding==='function') enc=catalogTitleEncoding(title,enc);
+  var raw=new Uint8Array(await fi.arrayBuffer());
+  if(raw.length>7*1024*1024){alert('>7MB');return}
+  setBookStat('准备...');var bar=document.getElementById('bookBar');bar.style.display='block';bar.max=raw.length;bar.value=0;
+  var tb=typeof catalogTitleToBytes==='function'?catalogTitleToBytes(title,enc,19):new TextEncoder().encode(title);
+  if(tb.length>19)tb=tb.slice(0,19);
+  var bc=new Uint8Array(6+tb.length);bc[0]=0x10;bc[1]=tb.length;bc.set(tb,2);
+  bc[2+tb.length]=(raw.length>>16)&0xff;bc[2+tb.length+1]=(raw.length>>8)&0xff;bc[2+tb.length+2]=raw.length&0xff;bc[2+tb.length+3]=enc;
+  var t0=clock_ms();
+  setBusy(true);
+  try{
+    await compactCatalog();
+    // begin
+    try{var ew10=ebookWait(0x10,5000);await sendCmd(bc);var ack=await ew10;
+      if(ack[1]!=0x00){var em='设备拒绝 status=0x'+(ack[1]&0xff).toString(16);
+        if(ack[1]==0xFE)em+=' (EPD忙，稍后重试)';
+        else if(ack[1]==0x01)em+=' (槽位已满：请点「刷新」回收槽位，或删书后重试；需最新固件)';
+        else if(ack[1]==0x02)em+=' (Flash空间不足，请删大书后重试)';
+        else em+=' (未知错误)';
+        setBookStat(em);return}}catch(e){setBookStat('begin超时');return}
+    // bulk stream via windowed writeValueWithoutResponse (max throughput)
+    await streamUpload(0x11,raw,bar,function(w,tot){setBookStat('上传中 '+w+'/'+tot+' ('+(w*100/tot).toFixed(1)+'%)')});
+    var secs=((clock_ms()-t0)/1000).toFixed(1);
+    // end
+    try{var ew12=ebookWait(0x12,10000);await sendCmd(new Uint8Array([0x12]));await ew12;setBookStat('✅ 完成 '+raw.length+'B / '+secs+'s')}catch(e){setBookStat('end超时')}
+  }catch(e){setBookStat('上传失败: '+(e.message||e));log('bookUpload err: '+e)}
+  finally{setBusy(false);bar.style.display='none'}
+  setTimeout(bookList,500);setTimeout(queryStatus,1000)
+}
+
+// ==================== Book list ====================
+async function bookList(){
+  if(busy){log('设备忙（传输中），请稍后再刷新列表');return}
+  entries=[];entryCount=0;document.getElementById('bookTable').innerHTML='<span class="fade">查询中...</span>';
+  try{var ew14=ebookWait(0x14,12000);await sendCmd(new Uint8Array([0x14]));await ew14}catch(e){document.getElementById('bookTable').innerHTML='<span class="fade">超时</span>';return}
+  if(entries.length==0){document.getElementById('bookTable').innerHTML='<span class="fade">空</span>';updateFlash();return}
+  var h='<table><tr><th>#</th><th>书名</th><th>编码</th><th>大小</th><th>操作</th></tr>';
+  for(var i=0;i<entries.length;i++){
+    var e=entries[i];var es=e.enc==0?'ASCII':'GB2312';var sz=e.len<1024?e.len+'B':(e.len/1024).toFixed(1)+'KB';
+    h+='<tr><td>'+e.idx+'</td><td>'+(e.title||'书#'+e.idx)+'</td><td>'+es+'</td><td>'+sz+'</td>'+
+       '<td><button onclick="bookOpen('+e.idx+')">打开</button> <button onclick="bookDel('+e.idx+')">删</button></td></tr>';
+  }
+  h+='</table>';document.getElementById('bookTable').innerHTML=h;updateFlash()
+}
+
+function updateFlash(){
+  var u=0;for(var i=0;i<entries.length;i++)u+=entries[i].len;
+  var max=7168*1024,pct=Math.min(100,(u/max*100).toFixed(1));
+  var c=pct>90?'#f85149':pct>70?'#d2991d':'#3fb950';
+  document.getElementById('flashBar').innerHTML='<span class="fade">Flash: '+(u/1024).toFixed(1)+' KB / 7168 KB</span>'+
+    '<div class="bar-g" style="margin-top:2px"><div class="bar-f" style="width:'+pct+'%;background:'+c+'"></div></div>';
+}
+
+async function bookOpen(i){if(busy)return;await sendCmd(new Uint8Array([0x20,i]))}
+async function bookDel(i){if(busy)return;if(!confirm('删除书#'+i+'?'))return;await sendCmd(new Uint8Array([0x13,i]));setTimeout(bookList,500)}
+
+// ==================== Lock Image Editor ====================
+var limg=null,lx=0,ly=0,lzoom=1,ldrag=false,ldx=0,ldy=0,lres=null;
+
+function imgLoad(inp){
+  var f=inp.files[0];if(!f)return;
+  var im=new Image();im.onload=function(){limg=im;lx=0;ly=0;lzoom=1;imgRender()};im.src=URL.createObjectURL(f)
+}
+
+function imgRender(){
+  var c=document.getElementById('editCanvas'),ctx=c.getContext('2d');
+  ctx.fillStyle='#222';ctx.fillRect(0,0,500,256);
+  if(!limg){ctx.fillStyle='#888';ctx.font='14px sans-serif';ctx.fillText('Select an image file',180,135);return}
+  var iw=limg.width,ih=limg.height;
+  // Fit image to crop area initially, keep aspect ratio
+  var scale=Math.min(250/iw,128/ih)*lzoom;
+  var sw=iw*scale,sh=ih*scale;
+  var cx=250,cy=128;
+  var ox=cx-sw/2+lx,oy=cy-sh/2+ly;
+  ctx.drawImage(limg,ox,oy,sw,sh)
+}
+
+// Drag
+document.getElementById('editorWrap').addEventListener('mousedown',function(e){
+  ldrag=true;ldx=e.offsetX-lx;ldy=e.offsetY-ly
+});
+window.addEventListener('mousemove',function(e){
+  if(!ldrag)return;var r=document.getElementById('editorWrap').getBoundingClientRect();
+  lx=e.clientX-r.left-ldx;ly=e.clientY-r.top-ldy;imgRender()
+});
+window.addEventListener('mouseup',function(){ldrag=false});
+document.getElementById('editorWrap').addEventListener('wheel',function(e){
+  e.preventDefault();lzoom*=e.deltaY<0?1.1:0.9;lzoom=Math.max(0.2,Math.min(5,lzoom));imgRender()
+});
+
+function imgPreview(){
+  if(!limg){alert('请选图');return}
+  var iw=limg.width,ih=limg.height;
+  var scale=Math.min(250/iw,128/ih)*lzoom;
+  var sw=iw*scale,sh=ih*scale;
+  var cx=250,cy=128;
+  var ox=cx-sw/2+lx,oy=cy-sh/2+ly;
+  // Map crop overlay (125,64)-(375,192) to source image coords
+  var cropX=125,cropY=64,cropW=250,cropH=128;
+  var srcX=((cropX-ox)/sw)*iw,srcY=((cropY-oy)/sh)*ih,srcW=(cropW/sw)*iw,srcH=(cropH/sh)*ih;
+  // Render
+  var off=document.createElement('canvas');off.width=250;off.height=128;
+  var ctx=off.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,250,128);
+  ctx.drawImage(limg,srcX,srcY,srcW,srcH,0,0,250,128);
+  // Dither
+  var data=ctx.getImageData(0,0,250,128),gray=new Uint8Array(32000);
+  for(var i=0;i<32000;i++)gray[i]=(data.data[i*4]*299+data.data[i*4+1]*587+data.data[i*4+2]*114)/1000;
+  var method=document.getElementById('imgMethod').value,bw=new Uint8Array(32000);
+  if(method=='threshold'){for(var i=0;i<32000;i++)bw[i]=gray[i]>127?255:0}
+  else{dither(gray,bw,method)}
+  // Pack into the firmware's epd_temp (= OBD ucScreen) format, derived from
+  // the firmware's own obdSetPixel/obdCreateVirtualDisplay source:
+  //   byte index = (y_byte * 250) + x        -> vertical-column layout
+  //   bit (y & 7) within byte, bit0 = TOP row -> LSB = top
+  //   bit=1 means BLACK (ucColor foreground), bit=0 means white
+  // bw[]: 255=white, 0=black.
+  lres=new Uint8Array(4000);
+  for(var x=0;x<250;x++){
+    for(var y=0;y<128;y++){
+      if(bw[y*250+x]<128) lres[((y>>3)*250)+x] |= (1<<(y&7));  // black -> set bit
+    }
+  }
+  // Preview
+  var pc=document.getElementById('imgThumb'),pctx=pc.getContext('2d'),pd=pctx.createImageData(250,128);
+  for(var i=0;i<32000;i++){var v=bw[i];pd.data[i*4]=pd.data[i*4+1]=pd.data[i*4+2]=v;pd.data[i*4+3]=255}
+  pctx.putImageData(pd,0,0);
+  document.getElementById('imgStatus').textContent='预览 OK，点发送'
+}
+
+function dither(gray,bw,m){
+  var w=250,h=128;
+  if(m=='floyd'){
+    var err=new Float32Array(w*h);
+    for(var y=0;y<h;y++)for(var x=0;x<w;x++){var i=y*w+x;var v=gray[i]+err[i];var b=v>127?255:0;bw[i]=b;var e=v-b;if(x+1<w)err[i+1]+=e*7/16;if(y+1<h){if(x>0)err[i+w-1]+=e*3/16;err[i+w]+=e*5/16;if(x+1<w)err[i+w+1]+=e*1/16}}
+  }else if(m=='atkinson'){
+    var err=new Float32Array(w*h);
+    for(var y=0;y<h;y++)for(var x=0;x<w;x++){var i=y*w+x;var v=gray[i]+err[i];var b=v>127?255:0;bw[i]=b;var e=(v-b)/8;if(x+1<w)err[i+1]+=e;if(x+2<w)err[i+2]+=e;if(y+1<h){if(x>0)err[i+w-1]+=e;err[i+w]+=e;if(x+1<w)err[i+w+1]+=e}if(y+2<h)err[i+2*w]+=e}
+  }else if(m=='ordered'){
+    var by=[1,9,3,11,13,5,15,7,4,12,2,10,16,8,14,6];
+    for(var y=0;y<h;y++)for(var x=0;x<w;x++){var t=by[(y&3)*4+(x&3)]*16;bw[y*w+x]=gray[y*w+x]>t?255:0}
+  }
+}
+
+async function imgSend(){
+  if(!lres){alert('请先预览');return}
+  if(busy){log('设备忙，请等待当前操作完成');return}
+  var s=document.getElementById('imgStatus');s.textContent='发送中...';
+  setBusy(true);
+  try{
+    // begin: wait for 0x30 ack before sending data (confirms erase done).
+    try{var ew=ebookWait(0x30,3000);await sendCmd(new Uint8Array([0x30,0x00,0x0F,0xA0]));var ba=await ew;if(ba[1]!=0x00){s.textContent='begin失败('+(ba[1]&0xff)+')';return}}catch(e){s.textContent='begin失败/超时';return}
+    // Stream data chunks with writeValue (Write Request).  The lock image is
+    // only 4000 bytes (17 chunks), so per-chunk WriteResponse round-trips are
+    // fine here (~0.5s total) -- no need for the high-throughput windowed path
+    // used by the font/book uploads.  Each await blocks until the firmware has
+    // page-programmed the chunk, so nothing is dropped.
+    var imgChunk=Math.max(40,blePayloadMax-3);
+    for(var off=0;off<4000;off+=imgChunk){
+      var c=lres.slice(off,Math.min(off+imgChunk,4000));
+      var p=new Uint8Array(3+c.length);p[0]=0x31;p[1]=(off>>8)&0xff;p[2]=off&0xff;p.set(c,3);
+      await sendCmd(p);
+      s.textContent='发送 '+Math.min(off+imgChunk,4000)+'/4000';
+    }
+    // end: wait for 0x32 ack.
+    try{var ew2=ebookWait(0x32,5000);await sendCmd(new Uint8Array([0x32]));var ea=await ew2;s.textContent='✅ 完成！长按F锁屏查看'}catch(e){s.textContent='end失败/超时'}
+  }catch(e){s.textContent='发送失败: '+(e.message||e);log('imgSend err: '+e)}
+  finally{setBusy(false)}
+  // Refresh the status badge so the "锁屏图" indicator updates, and re-read
+  // the stored image so the preview reflects what is actually on the device.
+  setTimeout(function(){queryStatus();loadLockImg()},400);
+}
+
+// ==================== Terminal ====================
+function termSend(){
+  var txt=document.getElementById('termIn').value;if(!txt)return;
+  var fmt=document.getElementById('termFmt').value;
+  var data=fmt=='hex'?hexToBytes(txt):new TextEncoder().encode(txt);
+  rxTx(data);document.getElementById('termIn').value=''
+}
+
+// ==================== Flash diagnostics ====================
+// These all run over the RxTx characteristic, which the firmware routes to
+// cmd_parser (0xF3 JEDEC / 0xF4 read / 0xF5 write-self-test).  Replies come
+// back as text on the same channel and are shown in the terminal as [RxTx].
+async function flashDiagJedec(){
+  if(!rxChar){document.getElementById('flashDiagStat').textContent='未连接';return}
+  document.getElementById('flashDiagStat').textContent='读取 JEDEC ID...（看终端）';
+  log('=== 读 JEDEC ID (0xF3) === 期待: EF 40 17 (W25Q64) / C8 40 17 (GD25Q64)');
+  try{await rxTx(new Uint8Array([0xF3]))}catch(e){log('发送失败: '+e)}
+}
+async function flashDiagRead(){
+  if(!rxChar){document.getElementById('flashDiagStat').textContent='未连接';return}
+  document.getElementById('flashDiagStat').textContent='读锁屏图扇区...（看终端）';
+  log('=== 读锁屏图: 0x7FF000(图头16B) / 0x7FFFA0(图尾16B) / 0x7FFFF0(标志16B) ===');
+  try{
+    await rxTx(hexToBytes('F47FF00010'));  // image head
+    await waitMs(150);
+    await rxTx(hexToBytes('F47FFFA010'));  // image tail (4000 bytes)
+    await waitMs(150);
+    await rxTx(hexToBytes('F47FFFF010'));  // flag area (offset 0xFF0)
+  }catch(e){log('发送失败: '+e)}
+}
+async function flashDiagReadAddr(){
+  if(!rxChar){document.getElementById('flashDiagStat').textContent='未连接';return}
+  var a=document.getElementById('dbgFlashAddr').value.replace(/\s/g,'');
+  if(!/^[0-9A-Fa-f]{6}$/.test(a)){document.getElementById('flashDiagStat').textContent='地址需6位HEX';return}
+  document.getElementById('flashDiagStat').textContent='读 0x'+a.toUpperCase()+'...（看终端）';
+  log('=== 读 0x'+a.toUpperCase()+' (0xF4) ===');
+  try{await rxTx(hexToBytes('F4'+a+'10'))}catch(e){log('发送失败: '+e)}
+}
+async function flashDiagSelfTest(){
+  if(!rxChar){document.getElementById('flashDiagStat').textContent='未连接';return}
+  document.getElementById('flashDiagStat').textContent='写自测...（看终端）';
+  log('=== Flash 写自测 (0xF5): 在 0x7FE000 擦→写测试串→回读 ===');
+  try{await rxTx(new Uint8Array([0xF5]))}catch(e){log('发送失败: '+e)}
+}
+
+// ==================== Firmware ====================
+async function fwSend(){
+  if(!wrChar){log('未连接');return}
+  if(busy){log('设备忙，请等待当前操作完成');return}
+  var f=document.getElementById('fwFile').files[0];if(!f)return;
+  var b=new Uint8Array(await f.arrayBuffer());
+  // Validate: first 4 bytes must be KNL header (4b4e4c54)
+  var hexStr=bytesToHex(b);
+  if(hexStr.substring(16,24)!='4b4e4c54'){alert('不是合法的Telink固件(.bin)，头部缺少KNL标记');return}
+  var ta=document.getElementById('fwCmd');
+  ta.value='固件大小: '+(b.length/1024).toFixed(1)+' KB, 擦除中...';
+  setBusy(true);
+
+  // Erase firmware area (0x20000..0x80000, in 4KB blocks)
+  var eraseAddr=0x20000;
+  while(eraseAddr<0x80000){
+    var eraseCmd=new Uint8Array([0x01,(eraseAddr>>16)&0xff,(eraseAddr>>8)&0xff,eraseAddr&0xff]);
+    try{await sendCmd(eraseCmd)}catch(e){ta.value='擦除失败';setBusy(false);return}
+    eraseAddr+=0x1000;
+  }
+  ta.value='擦除完成，写入中...';
+
+  // Send data using old OTA protocol: 0x03 for data chunks, 0x02 for bank write
+  // Each bank is 512 bytes (0x200 hex chars);
+  // 0x03 + hex data sends data to buffer, 0x02 + hex address writes buffer to flash.
+  ta.value='写入中...';
+  startTime=new Date().getTime();
+  fwSizeComplete=hexStr.length;
+  fwBytesTransmited=0;
+
+  var bankSize=0x200;  // 512 bytes per bank
+  var pos=0;
+  while(pos<b.length){
+    // Collect up to bankSize bytes for this bank
+    var chunk=b.slice(pos,Math.min(pos+bankSize,b.length));
+    var chunkHex=bytesToHex(chunk);
+
+    // Send data chunks (0x03 + hex data).  Chunk size is derived from the
+    // negotiated MTU: payload = MTU-3, minus 1 byte for the 0x03 opcode, the
+    // rest is ASCII hex so each chunk carries (payload-1)/2 binary bytes.
+    // At MTU 247 that's ~121 bytes/chunk vs the old fixed 240 hex chars that
+    // got fragmented across many MTU-23 packets.
+    var binPerChunk=Math.max(20,Math.floor((blePayloadMax-1)/2));
+    var partLen=binPerChunk*2;  // hex chars per write
+    var dataHex=chunkHex;
+    while(dataHex.length>0){
+      var curLen=Math.min(partLen,dataHex.length);
+      var dataPart=dataHex.substring(0,curLen);
+      dataHex=dataHex.substring(curLen);
+      try{await sendCmd(hexToBytes('03'+dataPart))}catch(e){ta.value='写入失败';setBusy(false);return}
+      fwBytesTransmited+=curLen;
+    }
+
+    // Write bank to flash at current address
+    var bankAddr=0x20000+pos;
+    var addrHex=decimalToHex(bankAddr,8);
+    try{await sendCmd(hexToBytes('02'+addrHex))}catch(e){ta.value='写入失败';setBusy(false);return}
+    // No fixed delay: WWR backpressure (await) already paces the data stream.
+    pos+=bankSize;
+    var pct=(pos/b.length*100).toFixed(1);
+    var elapsed=((new Date().getTime()-startTime)/1000).toFixed(1);
+    ta.value='写入: '+pos+'/'+b.length+' ('+pct+'%) '+elapsed+'s';
+  }
+
+  // CRC check and final write
+  var crc=calculateCRC(hexStr);
+  ta.value='校验CRC='+crc+'...';
+  /* NOTE: do NOT send the 0x06 CRC-check command here.
+     The firmware's cmd-7 (final flash) guards write_ota_firmware_to_flash()
+     with (out_buffer[5]==crc_out>>8 && out_buffer[6]==crc_out&0xff).
+     crc_out is reset to 0 during erase/write and out_buffer stays zeroed,
+     so the guard passes only while crc_out==0.  Issuing 0x06 would populate
+     crc_out with the real checksum and make the guard fail, leaving the
+     device NOT flashed and NOT rebooting.  This matches the reference
+     OTA_writing.html, which calls only doFinalFlash(). */
+  try{await doFinalFlash(crc)}catch(e){}
+  setBusy(false);
+  ta.value='✅ 固件刷写完成！CRC='+crc+'，设备将自动重启';
+}
+
+function calculateCRC(data){
+  var pos=0,outCRC=0;
+  while(pos<0x40000){
+    if(pos<data.length)outCRC+=parseInt(data.substr(pos,2),16);
+    else outCRC+=0xff;
+    pos+=2;
+  }
+  return decimalToHex(outCRC&0xffff,4);
+}
+
+async function doFinalFlash(crc){
+  await sendCmd(hexToBytes('07C001CEED'+crc));
+}
+
+function decimalToHex(d,padding){var hex=Number(d).toString(16);padding=typeof(padding)==='undefined'||padding===null?padding=2:padding;while(hex.length<padding){hex='0'+hex;}return hex;}
+
+// ==================== Helpers ====================
+function bytesToHex(data){return new Uint8Array(data).reduce(function(memo,i){return memo+("0"+i.toString(16)).slice(-2)},"")}
+function hexToBytes(h){h=h.replace(/\s/g,'');if(h.length%2)h='0'+h;var b=new Uint8Array(h.length/2);for(var i=0;i<h.length;i+=2)b[i/2]=parseInt(h.substr(i,2),16);return b}
+function byteToHex(b){return('0'+b.toString(16)).slice(-2)}
+function intToHex4(n){return('00000000'+n.toString(16)).slice(-8)}
+function be24(b,o){return(b[o]<<16)|(b[o+1]<<8)|b[o+2]}
+
+// Promise-based delay.  Upload loops yield to the event loop with this between
+// chunks so the BLE controller's write queue never overflows (the firmware
+// spends several ms per chunk on flash erase/program and can't keep up with a
+// blast of Write-Without-Response packets, which silently dropped chunks and
+// left the device image all-white / book data corrupted).
+function waitMs(ms){return new Promise(function(r){setTimeout(r,ms)})}
+
+async function eepromSendE8(){addLog('E8: EPD Part Init + BaseMap + Update');await rxTx(hexToBytes('E8'))}
+</script>
+</body>
+</html>
