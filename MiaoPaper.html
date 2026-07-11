@@ -246,6 +246,7 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
   </div>
 </div>
 
+<script src="web_tools/js/gb2312_map.js"></script>
 <script src="web_tools/js/gb2312_codec.js"></script>
 <script>
 // ==================== BLE ====================
@@ -365,8 +366,14 @@ async function rxTx(data){
 }
 
 // ==================== Notify ====================
+function notifyBytes(data){
+  if(data instanceof DataView)return new Uint8Array(data.buffer,data.byteOffset,data.byteLength);
+  if(data.buffer)return new Uint8Array(data.buffer,data.byteOffset||0,data.byteLength||data.buffer.byteLength);
+  return new Uint8Array(data);
+}
+
 function onNotify(data){
-  var b=new Uint8Array(data.buffer);
+  var b=notifyBytes(data);
   if(b.length>0&&b[0]==0x19){statusNotify(b);return}
   if(b.length>0&&b[0]==0x33){lockImgNotify(b);return}
   if(b.length>0&&b[0]==0x34){settingsNotify(b);return}
@@ -384,9 +391,10 @@ function onNotify(data){
 var ebookCB=null, ebookResolve=null;
 var entries=[], entryCount=0;
 var listEntryTimer=null;
+var bookWaitSlot=-1, bookFrag=null;
 
 function onRx(data){
-  var b=new Uint8Array(data.buffer);
+  var b=notifyBytes(data);
   try{var t=new TextDecoder().decode(b);if(/^[ -~\n\r\t]*$/.test(t))log('[RxTx] '+t.trim())}catch(e){}
 }
 
@@ -402,6 +410,72 @@ function ebookWait(cmd,ms){
   })
 }
 
+function ebookWaitBookSlot(idx,ms){
+  return new Promise((resolve,reject)=>{
+    bookWaitSlot=idx;bookFrag=null;
+    ebookCB=0x15;ebookResolve=resolve;
+    var t=setTimeout(()=>{
+      if(ebookCB===0x15&&bookWaitSlot===idx){
+        ebookCB=null;bookWaitSlot=-1;bookFrag=null;
+        reject(new Error('timeout'))
+      }
+    },ms);
+    var done=resolve;
+    ebookResolve=function(v){clearTimeout(t);done(v)};
+  })
+}
+
+function bookEntryFrom15(b){
+  var idx=b[1],tb=b.slice(2,22),enc=b[25]!=null?b[25]:0;
+  var t=typeof catalogTitleFromNotify==='function'?catalogTitleFromNotify(tb,enc):'';
+  if(!t){for(var i=0;i<tb.length&&tb[i];i++)t+=String.fromCharCode(tb[i]);}
+  var len=(b[22]<<16)|(b[23]<<8)|b[24];
+  return {idx:idx,title:t,len:len,enc:enc,absent:false};
+}
+
+function bookEntryFromFrag(frag){
+  var tb=frag.tb,enc=frag.enc;
+  var t=typeof catalogTitleFromNotify==='function'?catalogTitleFromNotify(tb,enc):'';
+  if(!t){for(var i=0;i<tb.length&&tb[i];i++)t+=String.fromCharCode(tb[i]);}
+  return {idx:frag.idx,title:t,len:frag.len,enc:enc,absent:false};
+}
+
+function handleBook15Notify(b){
+  if(ebookCB!==0x15||b[1]!==bookWaitSlot)return false;
+  if(b.length===3&&b[2]===0xFF){
+    bookWaitSlot=-1;bookFrag=null;ebookCB=null;
+    ebookResolve({idx:b[1],absent:true});
+    return true;
+  }
+  if(b.length===3&&b[2]===0xFE)return true;
+  if(b.length>=25){
+    bookWaitSlot=-1;bookFrag=null;ebookCB=null;
+    ebookResolve(bookEntryFrom15(b));
+    return true;
+  }
+  if(b.length>=4&&b[2]<=0x02){
+    if(!bookFrag||bookFrag.idx!==b[1])bookFrag={idx:b[1],tb:new Uint8Array(20),len:0,enc:0,parts:{}};
+    if(b[2]===0x00&&b.length>=15){
+      bookFrag.tb.set(b.subarray(3,15),0);
+      bookFrag.parts[0]=true;
+    }else if(b[2]===0x01&&b.length>=11){
+      bookFrag.tb.set(b.subarray(3,11),12);
+      bookFrag.parts[1]=true;
+    }else if(b[2]===0x02&&b.length>=6){
+      bookFrag.len=(b[3]<<16)|(b[4]<<8)|b[5];
+      bookFrag.enc=b[6]||0;
+      bookFrag.parts[2]=true;
+    }
+    if(bookFrag.parts[0]&&bookFrag.parts[1]&&bookFrag.parts[2]){
+      var ent=bookEntryFromFrag(bookFrag);
+      bookWaitSlot=-1;bookFrag=null;ebookCB=null;
+      ebookResolve(ent);
+    }
+    return true;
+  }
+  return false;
+}
+
 // Bytes the firmware reports it has committed to flash (from 0x11/0x17 notify).
 // The windowed uploader uses this as flow control: it keeps sending while
 // (sent - acked) < WINDOW, and waits (letting the controller drain) when the
@@ -415,19 +489,8 @@ function ebookNotify(b){
   else if(cmd==0x12&&b.length>=6){if(ebookCB==0x12){ebookResolve(b);ebookCB=null}}
   else if(cmd==0x14&&b.length>=2){
     entryCount=b[1];entries=[];
-    if(entryCount==0&&ebookCB==0x14){if(listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}ebookResolve([]);ebookCB=null}
-    else if(ebookCB==0x14){
-      if(listEntryTimer)clearTimeout(listEntryTimer);
-      listEntryTimer=setTimeout(function(){
-        if(ebookCB==0x14){log('书单部分到达 '+entries.length+'/'+entryCount);ebookResolve(entries.slice());ebookCB=null;listEntryTimer=null}
-      },4000);
-    }}
-  else if(cmd==0x15&&b.length>=25){
-    var idx=b[1],tb=b.slice(2,22),enc=b[25]!=null?b[25]:0;
-    var t=typeof catalogTitleFromNotify==='function'?catalogTitleFromNotify(tb,enc):'';
-    if(!t){for(var i=0;i<tb.length&&tb[i];i++)t+=String.fromCharCode(tb[i]);}
-    var len=(b[22]<<16)|(b[23]<<8)|b[24];entries.push({idx:idx,title:t,len:len,enc:enc});
-    if(entries.length>=entryCount&&ebookCB==0x14){if(listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}ebookResolve(entries);ebookCB=null}}
+    if(ebookCB==0x14){if(listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}ebookResolve(b);ebookCB=null}}
+  else if(cmd==0x15){handleBook15Notify(b)}
   else if((cmd==0x11||cmd==0x17)&&b.length>=4){
     var w=(b[1]<<16)|(b[2]<<8)|b[3];
     if(w>fwWritten)fwWritten=w;          // monotonic high-water mark
@@ -771,8 +834,17 @@ async function bookUpload(){
   var raw=new Uint8Array(await fi.arrayBuffer());
   if(raw.length>7*1024*1024){alert('>7MB');return}
   setBookStat('准备...');var bar=document.getElementById('bookBar');bar.style.display='block';bar.max=raw.length;bar.value=0;
-  var tb=typeof catalogTitleToBytes==='function'?catalogTitleToBytes(title,enc,19):new TextEncoder().encode(title);
+  var tb;
+  if(typeof catalogTitleToBytesAsync==='function') tb=await catalogTitleToBytesAsync(title,enc,19);
+  else if(typeof catalogTitleToBytes==='function') tb=catalogTitleToBytes(title,enc,19);
+  else tb=new TextEncoder().encode(title);
   if(tb.length>19)tb=tb.slice(0,19);
+  if(enc===1&&/[^\x00-\x7F]/.test(title)){
+    if(typeof gb2312EncodeChar!=='function'){alert('缺少 web_tools/js/gb2312_map.js，无法编码中文书名');return}
+    if(!tb.length){alert('书名 GB2312 编码失败，请 Ctrl+F5 刷新页面后重试');return}
+    if(tb[0]>=0xE0){alert('书名仍是 UTF-8 字节（设备会乱码），请 Ctrl+F5 强制刷新页面');return}
+    log('书名 GB2312: '+Array.from(tb).map(function(x){return ('0'+x.toString(16)).slice(-2)}).join(' '));
+  }
   var bc=new Uint8Array(6+tb.length);bc[0]=0x10;bc[1]=tb.length;bc.set(tb,2);
   bc[2+tb.length]=(raw.length>>16)&0xff;bc[2+tb.length+1]=(raw.length>>8)&0xff;bc[2+tb.length+2]=raw.length&0xff;bc[2+tb.length+3]=enc;
   var t0=clock_ms();
@@ -798,18 +870,59 @@ async function bookUpload(){
 }
 
 // ==================== Book list ====================
-async function bookList(){
-  if(busy){log('设备忙（传输中），请稍后再刷新列表');return}
-  entries=[];entryCount=0;document.getElementById('bookTable').innerHTML='<span class="fade">查询中...</span>';
-  try{var ew14=ebookWait(0x14,12000);await sendCmd(new Uint8Array([0x14]));await ew14}catch(e){document.getElementById('bookTable').innerHTML='<span class="fade">超时</span>';return}
-  if(entries.length==0){document.getElementById('bookTable').innerHTML='<span class="fade">空</span>';updateFlash();return}
+async function queryBookSlot(idx){
+  for(var attempt=0;attempt<3;attempt++){
+    try{
+      var ew15=ebookWaitBookSlot(idx,6000);
+      await sendCmd(new Uint8Array([0x15,idx]));
+      var ent=await ew15;
+      if(ent&&!ent.absent)return ent;
+      if(ent&&ent.absent)return null;
+    }catch(e){
+      if(attempt<2)await waitMs(150);
+    }
+  }
+  log('槽位 #'+idx+' 查询失败（超时或 EPD 忙）');
+  return null;
+}
+
+function renderBookTable(){
+  entries.sort(function(a,b){return a.idx-b.idx});
+  if(entries.length==0){
+    document.getElementById('bookTable').innerHTML='<span class="fade">空</span>';
+    updateFlash();return;
+  }
   var h='<table><tr><th>#</th><th>书名</th><th>编码</th><th>大小</th><th>操作</th></tr>';
   for(var i=0;i<entries.length;i++){
     var e=entries[i];var es=e.enc==0?'ASCII':'GB2312';var sz=e.len<1024?e.len+'B':(e.len/1024).toFixed(1)+'KB';
     h+='<tr><td>'+e.idx+'</td><td>'+(e.title||'书#'+e.idx)+'</td><td>'+es+'</td><td>'+sz+'</td>'+
        '<td><button onclick="bookOpen('+e.idx+')">打开</button> <button onclick="bookDel('+e.idx+')">删</button></td></tr>';
   }
-  h+='</table>';document.getElementById('bookTable').innerHTML=h;updateFlash()
+  h+='</table>';
+  if(entryCount>0&&entries.length<entryCount)h+='<p class="fade">已显示 '+entries.length+' / '+entryCount+' 本，继续查询…</p>';
+  document.getElementById('bookTable').innerHTML=h;
+  updateFlash();
+}
+
+async function bookList(){
+  if(busy){log('设备忙（传输中），请稍后再刷新列表');return}
+  entries=[];entryCount=0;document.getElementById('bookTable').innerHTML='<span class="fade">查询中...</span>';
+  try{var ew14=ebookWait(0x14,8000);await sendCmd(new Uint8Array([0x14]));var cntPkt=await ew14;entryCount=cntPkt[1]}catch(e){document.getElementById('bookTable').innerHTML='<span class="fade">超时</span>';return}
+  for(var idx=0;idx<8;idx++){
+    var ent=await queryBookSlot(idx);
+    if(ent){entries.push(ent);renderBookTable()}
+    else await waitMs(40);
+  }
+  if(entryCount>0&&entries.length<entryCount){
+    log('书单不完整：设备报告 '+entryCount+' 本，读到 '+entries.length+' 本，重试缺失槽位…');
+    for(var r=0;r<8;r++){
+      if(entries.some(function(e){return e.idx===r}))continue;
+      var ent2=await queryBookSlot(r);
+      if(ent2){entries.push(ent2);renderBookTable()}
+    }
+  }
+  if(entryCount>0&&entries.length<entryCount)log('⚠ 仍缺 '+(entryCount-entries.length)+' 本：请确认已烧录 Firmware/MiaoPaper.bin 并 Ctrl+F5 刷新网页');
+  renderBookTable();
 }
 
 function updateFlash(){

@@ -41,8 +41,6 @@
 
 ## 📸 效果预览
 
-> 请将截图放入 `docs/images/` 后替换下方路径
-
 <p align="center">
   <img src="docs/images/clock.jpg" width="280" alt="时钟界面">
   &nbsp;&nbsp;
@@ -51,8 +49,9 @@
 
 
 <p align="center">
-  <img src="docs/images/web-tool.jpg" width="580" alt="网页传书工具">
+  <img src="docs/images/webtools.png" width="580" alt="网页传书工具">
 </p>
+
 
 ---
 
@@ -62,11 +61,10 @@
 
 **方式 A — UART 线刷（首次）**
 
-1. 拆开 E1 后盖，确认主控为 **TLSR8258** 系列
-2. 焊接 GND / VCC / RX / RTS 四根线，接 USB-TTL（CH340）
-3. 打开 [UART 刷机工具](web_tools/uart_flasher.html) 或 [ATC 通用工具](https://atc1441.github.io/ATC_TLSR_Paper_UART_Flasher.html)
-4. 波特率 `460800`，选择 `Firmware/MiaoPaper.bin`
-5. 先点 **Unlock**，再点 **Write to Flash**
+1. 焊接 GND / VCC / RX / RTS 四根线，接 USB-TTL（CH340）
+2. 打开 [UART 刷机工具][TLSR825x USB-COM Flash Writer](https://pvvx.github.io/ATC_MiThermometer/USBCOMFlashTx.html)) 
+3. 波特率 `460800`或更高，选择 `Firmware/MiaoPaper.bin`
+4. 先点 **Unlock**，再点 **Write to Flash**
 
 **方式 B — 蓝牙 OTA（已有旧版固件时）**
 
@@ -88,18 +86,6 @@
 
 设备在时钟界面 → **长按右键 ~1 秒** → 选书 → **短按前键** 确认打开
 
-### Windows 上传加速
-
-Chrome 网页 MTU 固定 20 字节，大文件上传较慢。推荐使用 Python 工具：
-
-```powershell
-pip install -r web_tools/requirements-upload.txt
-python web_tools/mpp_upload.py scan
-python web_tools/mpp_upload.py book 书.txt -a MAC地址 -t "书名"
-```
-
----
-
 ## 🎮 按钮操作
 
 | 界面 | 操作 | 效果 |
@@ -120,23 +106,7 @@ python web_tools/mpp_upload.py book 书.txt -a MAC地址 -t "书名"
 
 ## 🌐 网页与工具
 
-| 工具 | 链接 | 用途 |
-|:-----|:-----|:-----|
-| 📡 蓝牙控制台 | [MiaoPaper.html](MiaoPaper.html) · [GitHub Pages](https://hrp518.github.io/MiaoPaper/) | 传书、传字库、设置、调试 |
-| 🔄 固件 OTA | [MiaoPaper_OTA.html](MiaoPaper_OTA.html) | 蓝牙固件升级 |
-| ⚡ 快速上传 | [mpp_upload.py](web_tools/mpp_upload.py) | Windows/Linux 命令行传书（bleak） |
-| 🔧 UART 刷机 | [uart_flasher.html](web_tools/uart_flasher.html) · [ATC 工具](https://atc1441.github.io/ATC_TLSR_Paper_UART_Flasher.html) | WebSerial 线刷固件 |
-
 蓝牙广播名：**`MPP_` + MAC 后三字节**（如 `MPP_A1B2C3`）
-
-本地运行网页工具：
-
-```bash
-cd web_tools && python -m http.server 8000
-# 浏览器打开 http://127.0.0.1:8000
-```
-
-> 需要 Chrome / Edge 等支持 Web Bluetooth 的浏览器。
 
 ---
 
@@ -157,7 +127,7 @@ makeit_build.bat
 
 | 项目 | 规格 |
 |:-----|:-----|
-| 主控 | Telink TLSR8258 |
+| 主控 | Telink TLSR8250 |
 | 屏幕 | 2.13" 墨水屏，SSD1680，250×122 像素 |
 | 存储 | 外置 SPI Flash（存书 + 字库） |
 | 连接 | BLE 4.x |
@@ -169,7 +139,7 @@ makeit_build.bat
 
 ```
 MiaoPaper/
-├── Firmware/           # TLSR8258 固件源码
+├── Firmware/           # TLSR8250 固件源码
 ├── MiaoPaper.html      # Web 蓝牙控制台
 ├── MiaoPaper_OTA.html  # OTA 页面
 ├── web_tools/          # 辅助网页与 Python 工具

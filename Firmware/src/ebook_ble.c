@@ -369,28 +369,73 @@ static void handle_book_list(uint8_t *payload, unsigned int payload_len)
 
 	count_resp[1] = count;
 	notify_epd(count_resp, 2);
+}
 
-	// Send each book entry (small gap avoids shallow BLE notify queue drops)
-	for (int i = 0; i < EB_MAX_BOOKS; i++) {
-		uint32_t entry_addr = EB_CATALOG_ADDR + 0x08 + i * EB_ENTRY_SIZE;
-		uint8_t entry[EB_ENTRY_SIZE];
-		ext_flash_read(entry_addr, EB_ENTRY_SIZE, entry);
-		if (entry[EB_ENT_OFF_FLAGS] != EB_FLAG_DONE) continue;
+// Host request: [0x15][idx] -> one book entry or [0x15][idx][0xFF] if empty.
+static void handle_book_get(uint8_t *payload, unsigned int payload_len)
+{
+	if (payload_len < 2) return;
 
-		uint8_t resp[26];
-		resp[0] = 0x15;
-		resp[1] = i;
-		memcpy(&resp[2], &entry[EB_ENT_OFF_TITLE], 20);
-		uint32_t len = entry[EB_ENT_OFF_LEN] |
-		               ((uint32_t)entry[EB_ENT_OFF_LEN+1] << 8) |
-		               ((uint32_t)entry[EB_ENT_OFF_LEN+2] << 16);
-		resp[22] = (len >> 16) & 0xFF;  // BE MSB first
-		resp[23] = (len >> 8) & 0xFF;
-		resp[24] = len & 0xFF;
-		resp[25] = entry[EB_ENT_OFF_ENC];
-		notify_epd(resp, 26);
-		WaitMs(15);
+	uint8_t idx = payload[1];
+	int wait_us = 200000;
+	while (!ext_flash_is_safe() && wait_us > 0) { WaitUs(1000); wait_us -= 1000; }
+	if (!ext_flash_is_safe()) {
+		uint8_t busy[3] = {0x15, idx, 0xFE};
+		notify_epd(busy, 3);
+		return;
 	}
+	ext_flash_init();
+
+	if (idx >= EB_MAX_BOOKS) {
+		uint8_t miss[3] = {0x15, idx, 0xFF};
+		notify_epd(miss, 3);
+		return;
+	}
+
+	uint32_t entry_addr = EB_CATALOG_ADDR + 0x08 + idx * EB_ENTRY_SIZE;
+	uint8_t entry[EB_ENTRY_SIZE];
+	ext_flash_read(entry_addr, EB_ENTRY_SIZE, entry);
+	if (entry[EB_ENT_OFF_FLAGS] != EB_FLAG_DONE) {
+		uint8_t miss[3] = {0x15, idx, 0xFF};
+		notify_epd(miss, 3);
+		return;
+	}
+
+	/* Windows Web Bluetooth often stays at ATT MTU 20 (17-byte notify payload).
+	 * Split into three <=15-byte notifications:
+	 *   [0x15][idx][0x00][title 0..11]
+	 *   [0x15][idx][0x01][title 12..19]
+	 *   [0x15][idx][0x02][len 3][enc] */
+	uint8_t p1[15];
+	uint8_t p2[11];
+	uint8_t p3[7];
+	uint32_t len = entry[EB_ENT_OFF_LEN] |
+	               ((uint32_t)entry[EB_ENT_OFF_LEN+1] << 8) |
+	               ((uint32_t)entry[EB_ENT_OFF_LEN+2] << 16);
+
+	p1[0] = 0x15;
+	p1[1] = idx;
+	p1[2] = 0x00;
+	memcpy(&p1[3], &entry[EB_ENT_OFF_TITLE], 12);
+
+	p2[0] = 0x15;
+	p2[1] = idx;
+	p2[2] = 0x01;
+	memcpy(&p2[3], &entry[EB_ENT_OFF_TITLE + 12], 8);
+
+	p3[0] = 0x15;
+	p3[1] = idx;
+	p3[2] = 0x02;
+	p3[3] = (len >> 16) & 0xFF;
+	p3[4] = (len >> 8) & 0xFF;
+	p3[5] = len & 0xFF;
+	p3[6] = entry[EB_ENT_OFF_ENC];
+
+	notify_epd(p1, 15);
+	WaitMs(12);
+	notify_epd(p2, 11);
+	WaitMs(12);
+	notify_epd(p3, 7);
 }
 
 // --- Lock screen image upload ---
@@ -784,6 +829,7 @@ int ebook_ble_handle_command(uint8_t *payload, unsigned int payload_len)
 	case 0x13: handle_book_delete(payload, payload_len); break;
 	case 0x1A: handle_catalog_compact(payload, payload_len); break;
 	case 0x14: handle_book_list(payload, payload_len); break;
+	case 0x15: handle_book_get(payload, payload_len); break;
 	case 0x19: handle_status(); break;
 	case 0x16: handle_font_begin(payload, payload_len); break;
 	case 0x17: handle_font_data(payload, payload_len); break;
