@@ -103,8 +103,13 @@ void set_EPD_scene(uint8_t scene)
 void set_EPD_wait_flush() {
     epd_wait_update = 1;
     epd_refresh_scene_enter(EPD_RF_SCENE_CLOCK);
-    if (!settings.epd_partial_enabled)
-        epd_partial_ready = 0;
+    /* Scene change (incl. unlock from the lock screen): ALWAYS require a
+     * full refresh.  The panel is deep-slept after every refresh, and a
+     * partial refresh waking it via only 0x00 silently fails after deep
+     * sleep (observed: the clock never replaced the lock image and the
+     * device looked stuck on the screen saver).  A full refresh performs a
+     * hardware reset and always draws. */
+    epd_partial_ready = 0;
 }
 
 

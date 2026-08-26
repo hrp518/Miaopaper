@@ -1021,8 +1021,10 @@ void ebook_handle_unlock(void)
 		ble_log(lk);
 	}
 	if (eb_mode == EB_MODE_READ) {
-		if (!settings.epd_partial_enabled)
-			epd_partial_ready = 0;
+		/* Unlock restores a NEW scene: drop partial so the first page is a
+		 * full refresh (fresh 0x26 base), not a diff against the lock image
+		 * (which silently fails after the panel's deep sleep). */
+		epd_partial_ready = 0;
 		render_pending = 1;
 		ebook_display_current_page();
 	} else {
