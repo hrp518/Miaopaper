@@ -52,7 +52,6 @@ RAM lwbtn_btn_t lwbtns[3];
 RAM lwbtn_t     my_group;
 RAM uint8_t     long_fired[3];
 RAM uint32_t    btn_last_10ms;
-RAM uint16_t    btn_reinit_count;
 
 /* ===================== Mode action handlers ===================== */
 
@@ -194,33 +193,30 @@ static void btn_reconfig_gpio(void)
 
 void ebook_buttons_init(void)
 {
-    btn_reconfig_gpio();
+	btn_reconfig_gpio();
 
-    for (int i = 0; i < 3; i++) {
-        lwbtns[i].arg = &btn_args[i];
-        long_fired[i] = 0;
-    }
-    btn_last_10ms = 0;
-    btn_reinit_count = 0;
+	for (int i = 0; i < 3; i++) {
+		lwbtns[i].arg = &btn_args[i];
+		long_fired[i] = 0;
+	}
+	btn_last_10ms = 0;
 
-    /* Manually populate the group fields.  lwbtn_init_ex() is not used
-     * because its NULL-pointer check misfires on this compiler (tc32 gcc
-     * 4.5.1) and returns 0 after zeroing our group. */
-    memset(&my_group, 0, sizeof(my_group));
-    my_group.btns = lwbtns;
-    my_group.btns_cnt = 3;
-    my_group.evt_fn = btn_evt;
-    my_group.get_state_fn = btn_get_state;
+	/* Manually populate the group fields.  lwbtn_init_ex() is not used
+	 * because its NULL-pointer check misfires on this compiler (tc32 gcc
+	 * 4.5.1) and returns 0 after zeroing our group. */
+	memset(&my_group, 0, sizeof(my_group));
+	my_group.btns = lwbtns;
+	my_group.btns_cnt = 3;
+	my_group.evt_fn = btn_evt;
+	my_group.get_state_fn = btn_get_state;
 
-    /* Register the 3 buttons as low-level GPIO wake-up sources so that
-     * while a button is HELD down the CPU wakes immediately on every
-     * connection-interval sleep and runs main_loop fast, letting lwbtn
-     * detect the press/keep-alive quickly.  Polarity = Level_Low because
-     * buttons are active-low. */
-    cpu_set_gpio_wakeup(BTN_FRONT_PIN, Level_Low, 1);
-    cpu_set_gpio_wakeup(BTN_LEFT_PIN,  Level_Low, 1);
-    cpu_set_gpio_wakeup(BTN_RIGHT_PIN, Level_Low, 1);
-    bls_pm_setWakeupSource(PM_WAKEUP_PAD);
+	/* NOTE: no GPIO pad wake-up is configured for the buttons.  The buttons
+	 * have no external pull-up and deep sleep drops the internal analog
+	 * pulls (afe_0x0e~afe_0x15 are not retained), so the pins float while
+	 * asleep: a Level_Low pad wake-up fires randomly (self-wake), and
+	 * driving the pins high (to stop the floating) makes the wake-up blind
+	 * to real presses.  The locked state is woken by the 32k timer instead
+	 * (app.c) and the buttons are polled every ~100 ms. */
 }
 
 void ebook_button_tick(void)
@@ -231,13 +227,12 @@ void ebook_button_tick(void)
     btn_last_10ms = now;
 
     /* Deep retention sleep does NOT retain the analog GPIO config (1M pullup)
-     * on TLSR825x, so the buttons misread after the first sleep cycle.
-     * Re-apply it every ~1 second in main_loop context (awake = safe).
-     * This is the same operation ED01 does and is proven to fix detection. */
-    if (++btn_reinit_count >= 100) {
-        btn_reinit_count = 0;
-        btn_reconfig_gpio();
-    }
+     * on TLSR825x, so the button pins float after every sleep cycle.  Re-apply
+     * the config on EVERY tick: in the locked state the device now wakes on
+     * the 32k timer every ~100 ms specifically to poll the buttons, so the
+     * pins must be valid before each read.  A handful of GPIO register writes
+     * every 10 ms is negligible; it also covers the old per-second re-apply. */
+    btn_reconfig_gpio();
 
     uint32_t mstime = now / CLOCK_SYS_CLOCK_1MS;
     lwbtn_process_ex(&my_group, mstime);

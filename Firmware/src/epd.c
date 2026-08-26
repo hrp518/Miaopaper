@@ -30,6 +30,18 @@ const char *epd_model_string[] = {"NC", "BW213", "BWR213", "BWR154", "213ICE", "
 RAM uint8_t epd_update_state = 0;
 RAM uint8_t epd_partial_ready = 0;  // 0 = need full refresh, 1 = base map established, can use partial
 
+/* Watchdog anchor for epd_update_state.  EPD_Display() arms a refresh
+ * (state=1) and records the clock tick here; epd_state_handler() clears the
+ * state once the panel deasserts BUSY.  If BUSY never deasserts (pin floating
+ * after a deep-retention wake, panel wedged mid-refresh) the state would stick
+ * at 1 forever, and EVERY later redraw -- including the unlock screen -- is
+ * skipped, so the device looks frozen on the lock image.  Cap it at a few
+ * seconds and force the panel asleep. */
+/* clock_time_exceed() takes MICROSECONDS (internal tick = 16 MHz); 8 s of
+ * stuck BUSY is far longer than any legit refresh (~1-3 s). */
+#define EPD_STATE_BUSY_TIMEOUT_US  8000000UL
+RAM uint32_t epd_state_tick = 0;
+
 RAM uint8_t epd_scene = 2;
 RAM uint8_t epd_wait_update = 0;
 
@@ -186,8 +198,9 @@ _attribute_ram_code_ void EPD_Display(unsigned char *image, unsigned char *red_i
     ble_log(_dbuff);
     sleep_ms(15);
 
-    epd_temperature_is_read = 1;
-    epd_update_state = 1;
+epd_temperature_is_read = 1;
+	epd_update_state = 1;
+	epd_state_tick = clock_time();
 }
 
 _attribute_ram_code_ void epd_set_sleep(void)
@@ -198,31 +211,41 @@ _attribute_ram_code_ void epd_set_sleep(void)
     if (epd_model >= 1)
         EPD_BW_213_set_sleep();
 
-    EPD_POWER_OFF();
-    epd_update_state = 0;
+EPD_POWER_OFF();
+	epd_update_state = 0;
+	epd_state_tick = clock_time();
 }
 
 _attribute_ram_code_ uint8_t epd_state_handler(void)
 {
-    switch (epd_update_state)
-    {
-    case 0:
-        // Nothing todo
-        break;
-    case 1: // check if refresh is done and sleep epd if so
-        if (epd_model == 1)
-        {
-            if (!EPD_IS_BUSY())
-                epd_set_sleep();
-        }
-        else
-        {
-            if (EPD_IS_BUSY())
-                epd_set_sleep();
-        }
-        break;
-    }
-    return epd_update_state;
+	switch (epd_update_state)
+	{
+	case 0:
+		// Nothing todo
+		break;
+	case 1: // check if refresh is done and sleep epd if so
+		if (epd_model == 1)
+		{
+			if (!EPD_IS_BUSY())
+				epd_set_sleep();
+			else if (clock_time_exceed(epd_state_tick, EPD_STATE_BUSY_TIMEOUT_US))
+			{
+				/* BUSY never released: floating pad after a deep-retention
+				 * wake or a wedge mid-refresh.  Without this watchdog
+				 * epd_update_state stays 1 indefinitely and the device looks
+				 * frozen (every redraw -- unlock included -- is skipped). */
+				ble_log("EPD:WD force sleep (busy timeout)");
+				epd_set_sleep();
+			}
+		}
+		else
+		{
+			if (EPD_IS_BUSY())
+				epd_set_sleep();
+		}
+		break;
+	}
+	return epd_update_state;
 }
 
 _attribute_ram_code_ void FixBuffer(uint8_t *pSrc, uint8_t *pDst, uint16_t width, uint16_t height)

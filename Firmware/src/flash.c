@@ -8,7 +8,7 @@
 
 #include "flash.h"
 
-#define MAGIC_WORD 0xABCFF123
+#define MAGIC_WORD 0xABCFF125
 
 // Selectable idle-sleep timeouts (seconds), indexed by settings.sleep_timeout_idx.
 const uint16_t g_sleep_timeout_s[SLEEP_TIMEOUT_COUNT] = {15, 30, 60, 120};
@@ -48,7 +48,7 @@ void reset_settings_to_default(void)
 	settings.ebook_prev_char_pos = 0;
 	settings.ble_enabled = 1;        // BLE on by default
 	settings.sleep_timeout_idx = 2;  // 60s by default
-	settings.epd_partial_enabled = 0; // scene-switch full by default
+	settings.epd_partial_enabled = 0; // scene-switch full by default (局刷码关)
 	settings.epd_gc_interval_idx = 0; // GC every 10 partial refreshes
 }
 

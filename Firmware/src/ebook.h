@@ -93,6 +93,11 @@
 #define EB_LINE_H_HZ      18
 
 #define EB_READ_BUF_SIZE  80
+// A page renders at most EB_LINES_PER_PAGE lines and each line consumes at
+// most EB_READ_BUF_SIZE bytes (find_line_break_* never returns more than it
+// was given), so no page can span more than this many bytes.  This bounds
+// how far back the prev-page search (ebook_layout.h) needs to look.
+#define EB_PAGE_BACK_MAX   (EB_LINES_PER_PAGE * EB_READ_BUF_SIZE)
 
 // UI modes
 typedef enum {

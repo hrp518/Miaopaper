@@ -146,7 +146,7 @@
 #define PA7_FUNC	AS_SWIRE
 #endif
 #ifndef PULL_WAKEUP_SRC_PA0
-#define PULL_WAKEUP_SRC_PA0	0
+#define PULL_WAKEUP_SRC_PA0	PM_PIN_PULLUP_1M	// EPD_BUSY: keep pulled high, wakeup disabled in app
 #endif
 #ifndef PULL_WAKEUP_SRC_PA1
 #define PULL_WAKEUP_SRC_PA1	0
@@ -304,7 +304,7 @@
 #define PULL_WAKEUP_SRC_PB3	0
 #endif
 #ifndef PULL_WAKEUP_SRC_PB4
-#define PULL_WAKEUP_SRC_PB4	0
+#define PULL_WAKEUP_SRC_PB4	PM_PIN_PULLUP_1M	// BTN_FRONT: active-low button, keep high
 #endif
 #ifndef PULL_WAKEUP_SRC_PB5
 #define PULL_WAKEUP_SRC_PB5	0
@@ -438,7 +438,7 @@
 #define PC7_FUNC	AS_GPIO
 #endif
 #ifndef PULL_WAKEUP_SRC_PC0
-#define PULL_WAKEUP_SRC_PC0	0
+#define PULL_WAKEUP_SRC_PC0	PM_PIN_PULLUP_1M	// BTN_RIGHT: active-low button, keep high
 #endif
 #ifndef PULL_WAKEUP_SRC_PC1
 #define PULL_WAKEUP_SRC_PC1	0
@@ -450,7 +450,7 @@
 #define PULL_WAKEUP_SRC_PC3	0
 #endif
 #ifndef PULL_WAKEUP_SRC_PC4
-#define PULL_WAKEUP_SRC_PC4	0
+#define PULL_WAKEUP_SRC_PC4	PM_PIN_PULLUP_1M	// BTN_LEFT: active-low button, keep high
 #endif
 #ifndef PULL_WAKEUP_SRC_PC5
 #define PULL_WAKEUP_SRC_PC5	0

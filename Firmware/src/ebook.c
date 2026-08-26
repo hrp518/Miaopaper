@@ -10,6 +10,7 @@
 #include "flash.h"
 #include "ble.h"
 #include "ebook.h"
+#include "ebook_layout.h"
 #include "battery.h"
 #include "epd_refresh.h"
 #include "buttons.h"
@@ -459,6 +460,66 @@ void ebook_catalog_set_flag(uint8_t book_idx, uint8_t flags)
 	ext_flash_page_program(EB_CATALOG_ADDR + addr_off, 1, &flags);
 }
 
+// ===================== Page-turn history + backward pagination =====================
+// PREV used to keep a single prev_char_pos snapshot with 0 doubling as "no
+// history", so a second consecutive prev (or a prev right after opening a
+// book at a saved position) restored position 0 and jumped to the start of
+// the text.  Navigation now uses a small stack of the page starts actually
+// shown this session; when the stack is empty (just opened at a restored
+// position), the previous page start is derived by layout instead.
+
+#define EB_PAGE_HIST_DEPTH 16
+// The stack lives in NORMAL RAM, not retention RAM: the retention area is
+// completely full (adding these 65 bytes made the linker overlay .text),
+// so they do not fit there.  Deep retention sleep therefore leaves the
+// contents garbage; a magic word detects that and drops the history --
+// PREV then falls back to backward layout, which is exact for any position
+// produced by forward paging anyway.
+static uint32_t eb_page_hist[EB_PAGE_HIST_DEPTH];
+static uint8_t  eb_page_hist_len;
+static uint32_t eb_page_hist_magic;
+#define EB_PAGE_HIST_MAGIC 0xEB11EB11u
+
+// Scratch window for the backward layout search.  Plain RAM is fine: it is
+// only used synchronously inside one ebook_prev_page() call.
+static uint8_t eb_back_win[EB_PAGE_BACK_MAX + EB_READ_BUF_SIZE];
+
+static void eb_hist_reset(void)
+{
+	eb_page_hist_magic = EB_PAGE_HIST_MAGIC;
+	eb_page_hist_len = 0;
+}
+
+// Discard garbage history after a deep-sleep wake (magic mismatch).
+static void eb_hist_check_wake(void)
+{
+	if (eb_page_hist_magic != EB_PAGE_HIST_MAGIC)
+		eb_hist_reset();
+}
+
+static void eb_hist_push(uint32_t pos)
+{
+	eb_hist_check_wake();
+	if (eb_page_hist_len >= EB_PAGE_HIST_DEPTH) {
+		// Full: drop the oldest entry.
+		for (int i = 1; i < EB_PAGE_HIST_DEPTH; i++)
+			eb_page_hist[i - 1] = eb_page_hist[i];
+		eb_page_hist_len = EB_PAGE_HIST_DEPTH - 1;
+	}
+	eb_page_hist[eb_page_hist_len++] = pos;
+}
+
+static void eb_fill_from_flash(uint32_t off, uint32_t len, uint8_t *dst)
+{
+	ext_flash_read(ebook_state.book_start + off, (uint16_t)len, dst);
+}
+
+static uint32_t find_prev_page_start(uint32_t S)
+{
+	return eb_find_prev_page_start(S, ebook_state.book_len, ebook_state.encoding,
+	                               eb_fill_from_flash, eb_back_win, sizeof(eb_back_win));
+}
+
 // ===================== Init / Open / Close =====================
 
 void ebook_init(void)
@@ -470,6 +531,7 @@ void ebook_init(void)
 	 * per-book reading position is still preserved in the external-flash
 	 * progress ring, so re-opening the same book later resumes correctly. */
 	memset(&ebook_state, 0, sizeof(ebook_state));
+	eb_hist_reset();
 	/* Remember which book + position was last read, purely so that the next
 	 * ebook_open() (or any code that reads ebook_state) is consistent, but
 	 * keep eb_mode on the clock. */
@@ -517,6 +579,9 @@ void ebook_open(uint8_t book_idx)
 		settings.ebook_char_pos = ebook_state.char_pos;
 		settings.ebook_prev_char_pos = 0;
 	}
+	// Fresh session on this book: no back-navigation history.  PREV from the
+	// restored position will derive the previous page by layout.
+	eb_hist_reset();
 	save_settings_to_flash();
 
 	ebook_display_current_page();
@@ -559,6 +624,7 @@ void ebook_next_book(void)
 			ebook_state.book_start = start;
 			ebook_state.book_len = len;
 			ebook_state.encoding = enc;
+			eb_hist_reset();
 			ebook_display_current_page();
 			return;
 		}
@@ -593,44 +659,8 @@ static void draw_hz_char(uint8_t high, uint8_t low, int x, int y)
 }
 
 // ===================== Line breaking =====================
-
-static int find_line_break_ascii(const uint8_t *buf, int len, int max_w)
-{
-	int x = 0, last_space = -1;
-	for (int i = 0; i < len; i++) {
-		if (buf[i] == '\n') return i + 1;
-		if (buf[i] == '\r') continue;
-		uint8_t c = buf[i];
-		if (c < 0x20 || c > 0x7E) c = ' ';
-		int cw = Dialog_plain_16Glyphs[c - 0x20].xAdvance;
-		if (c == ' ') last_space = i;
-		if (x + cw > max_w) {
-			return (last_space >= 0) ? last_space + 1 : i;
-		}
-		x += cw;
-	}
-	return len;
-}
-
-static int find_line_break_gb2312(const uint8_t *buf, int len, int max_w)
-{
-	int x = 0, i = 0;
-	while (i < len) {
-		if (buf[i] == '\n') return i + 1;
-		if (buf[i] == '\r') { i++; continue; }
-
-		int cw, cb;
-		if (buf[i] >= 0xA1 && i + 1 < len && buf[i+1] >= 0xA1) {
-			cw = EB_HZ_CHAR_W; cb = 2;
-		} else {
-			cw = EB_ASCII_W; cb = 1;
-		}
-		if (x + cw > max_w) return i;
-		x += cw;
-		i += cb;
-	}
-	return len;
-}
+// find_line_break_ascii()/find_line_break_gb2312() live in ebook_layout.h
+// (shared with the host-side pagination test).
 
 // ===================== Title rendering (ASCII or GB2312) =====================
 
@@ -683,12 +713,14 @@ static void draw_title_string(const char *title, uint8_t enc, int x, int baselin
 				cx += EB_HZ_CHAR_W;
 				i += 2;
 			} else {
-				if (cx + EB_ASCII_W > x + max_w) break;
+				/* Full-width advance, same reason as render_page_gb2312: the
+				 * HZK16 A3xx letters occupy the whole 16 px cell. */
+				if (cx + EB_HZ_CHAR_W > x + max_w) break;
 				uint8_t c = p[i++];
 				if (c == '\r' || c == '\n') continue;
 				if (c < 0x20 || c > 0x7E) c = ' ';
 				draw_hz_char(0xA3, c + 0x80, cx, y_hz);
-				cx += EB_ASCII_W;
+				cx += EB_HZ_CHAR_W;
 			}
 		}
 	} else {
@@ -793,11 +825,18 @@ static uint32_t render_page_gb2312(uint32_t pos)
 				x += EB_HZ_CHAR_W;
 				i += 2;
 			} else {
+				/* Half-width (8 px) advance overlapped the next glyph: the
+				 * HZK16 A3xx "full-width ASCII" letters span the whole 16 px
+				 * cell (their right stroke reaches columns 9..13), so drawing
+				 * the next char at x+8 pressed it onto the previous letter
+				 * (e.g. "N" + CJK "去").  Advance a full cell like the
+				 * surrounding characters -- no overlap, consistent spacing. */
 				uint8_t c = ebook_read_buf[i];
 				if (c == '\r' || c == '\n') { i++; continue; }
 				if (c < 0x20 || c > 0x7E) c = ' ';
-				draw_hz_char(0xA3, c + 0x80, x, y);
-				x += EB_ASCII_W;
+				if (x + EB_HZ_CHAR_W <= EB_MAX_LINE_W)
+					draw_hz_char(0xA3, c + 0x80, x, y);
+				x += EB_HZ_CHAR_W;
 				i++;
 			}
 		}
@@ -854,7 +893,8 @@ void ebook_next_page(void)
 	}
 
 	// Advance to next page NOW, before visible render
-	ebook_state.prev_char_pos = ebook_state.char_pos;
+	eb_hist_push(ebook_state.char_pos);
+	ebook_state.prev_char_pos = ebook_state.char_pos;   // legacy settings mirror
 	ebook_state.char_pos = next_pos;
 
 	// Persist to the flash-friendly progress ring (amortised erase, so this
@@ -871,11 +911,25 @@ void ebook_next_page(void)
 void ebook_prev_page(void)
 {
 	if (!ebook_state.active) return;
-	if (ebook_state.prev_char_pos == 0 && ebook_state.char_pos == 0) return;
+	if (ebook_state.char_pos == 0) return;   // already on the very first page
+	if (!ext_flash_is_safe()) return;        // EPD refresh owns the SPI bus
+	eb_hist_check_wake();
 
-	uint32_t back = ebook_state.prev_char_pos;
-	ebook_state.prev_char_pos = 0;
+	uint32_t back;
+	if (eb_page_hist_len > 0) {
+		// Exact page we came from: pop the history stack.
+		back = eb_page_hist[--eb_page_hist_len];
+	} else {
+		// No in-session history (e.g. just opened the book at a saved
+		// position): derive the previous page start by layout.
+		back = find_prev_page_start(ebook_state.char_pos);
+		if (back >= ebook_state.char_pos) return;   // defensive: must step back
+	}
+
 	ebook_state.char_pos = back;
+	// Legacy single-step mirror (settings compatibility only; real back
+	// navigation state lives in eb_page_hist).
+	ebook_state.prev_char_pos = (eb_page_hist_len > 0) ? eb_page_hist[eb_page_hist_len - 1] : 0;
 	settings.ebook_char_pos = ebook_state.char_pos;
 	settings.ebook_prev_char_pos = ebook_state.prev_char_pos;
 	ebook_progress_save(ebook_state.book_idx, ebook_state.char_pos);
@@ -888,10 +942,16 @@ void ebook_prev_page(void)
 void ebook_render_lock(void)
 {
 	uint8_t valid = 0;
-	if (ext_flash_is_safe()) {
-		ext_flash_init();
-		ext_flash_read(EB_LOCK_IMG_ADDR + EB_LOCK_IMG_FLAG_OFFSET, 1, &valid);
+	if (!ext_flash_is_safe()) {
+		/* The EPD shares CLK/MOSI with the external flash.  Rendering now
+		 * would skip the image check (drawing the text fallback) and stack
+		 * a second refresh on a busy panel; retry from main_loop instead. */
+		render_pending = 1;
+		return;
 	}
+
+	ext_flash_init();
+	ext_flash_read(EB_LOCK_IMG_ADDR + EB_LOCK_IMG_FLAG_OFFSET, 1, &valid);
 
 	if (valid == EB_LOCK_IMG_FLAG_VALUE) {
 		// Has lock image: display it FULL-SCREEN (no white bar, no text overlay).
@@ -922,10 +982,24 @@ void ebook_handle_lock(void)
 	// just the clock, so the user can put the device to sleep while reading.
 	eb_prev_mode = eb_mode;               // remember where we came from
 	eb_mode = EB_MODE_LOCK;
+	{	// Debug: did the lock actually run, and does the panel state allow it?
+		char lk[48];
+		sprintf(lk, "LK:LOCK prev=%d st=%d", eb_prev_mode, epd_update_state);
+		ble_log(lk);
+	}
 	/* Lock screen: scene change, force full refresh.  (ebook_render_lock
 	 * already passes full=1; clearing the flag keeps the state consistent so
 	 * the following unlock re-establishes a clean base map.) */
 	epd_partial_ready = 0;
+	/* Defer while the EPD is mid-refresh: the SPI bus is shared with the
+	 * external flash, so rendering now would skip the lock image (leaving a
+	 * "Locked / Hold F to wake" text screen despite a stored image) and start
+	 * a second refresh on a busy panel.  A long-press F can land at any time,
+	 * including during the per-minute clock refresh. */
+	if (epd_update_state) {
+		render_pending = 1;
+		return;
+	}
 	ebook_render_lock();
 }
 
@@ -938,6 +1012,13 @@ void ebook_handle_unlock(void)
 	eb_mode = eb_prev_mode;
 	if (eb_mode == EB_MODE_SETTINGS || eb_mode == EB_MODE_SELECT || eb_mode == EB_MODE_ABOUT) {
 		eb_mode = EB_MODE_CLOCK;
+	}
+	{
+		// Debug: did the long-press unlock fire, and is the EPD available
+		// (st=0) for the restore redraw, or wedged (st=1, screens freezes)?
+		char lk[48];
+		sprintf(lk, "LK:UNLK mode=%d p=%d st=%d", eb_mode, epd_partial_ready, epd_update_state);
+		ble_log(lk);
 	}
 	if (eb_mode == EB_MODE_READ) {
 		if (!settings.epd_partial_enabled)
@@ -1371,6 +1452,8 @@ void ebook_check_pending_render(void)
 		ebook_render_settings();
 	} else if (eb_mode == EB_MODE_ABOUT) {
 		ebook_render_about();
+	} else if (eb_mode == EB_MODE_LOCK) {
+		ebook_render_lock();
 	} else if (eb_mode == EB_MODE_CLOCK) {
 		epd_update(get_time(), battery_mv, 0);
 	}

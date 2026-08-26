@@ -59,6 +59,9 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
 <div class="row">
   <button class="primary" id="btnConnect" onclick="doConnect()">Connect</button>
   <button onclick="doDisconnect()">Disconnect</button>
+  <label class="fade" title="勾选后扫描并显示所有低功耗蓝牙设备（不再只显示名字以 MPP 开头的设备），需要自己从列表里挑出 MiaoPaper">
+    <input type="checkbox" id="scanAll"> 不筛选MPP
+  </label>
   <span class="fade" id="devName"></span>
 </div>
 
@@ -132,7 +135,7 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
       <label>上传书籍</label>
       <div class="row">
         <input placeholder="书名" id="bookName" style="width:140px">
-        <select id="bookEnc"><option value="0">ASCII</option><option value="1" selected>GB2312</option></select>
+        <select id="bookEnc"><option value="auto" selected>自动检测</option><option value="0">ASCII</option><option value="1">GB2312</option></select>
         <input type="file" accept=".txt,.bin" id="bookFile" style="flex:1">
       </div>
       <div class="row" style="margin-top:2px">
@@ -274,11 +277,13 @@ function setStatus(c, t){var d=document.getElementById('led');var s=document.get
 
 function doConnect(){
   if(conn){doDisconnect();return}
-  navigator.bluetooth.requestDevice({
-    // 蓝牙广播名 MPP_XXXXXX（见固件 ble.c）
-    filters:[{namePrefix:'MPP'}],
-    optionalServices:['0000221f-0000-1000-8000-00805f9b34fb','00001f10-0000-1000-8000-00805f9b34fb']
-  }).then(d=>{
+  // 默认只显示名字以 "MPP" 开头的设备（固件广播名 MPP_XXXXXX，见 ble.c）。
+  // 勾选"不筛选MPP"后改为显示所有低功耗设备，便于在设备改名/过滤失效时排查。
+  var scanAll=document.getElementById('scanAll')&&document.getElementById('scanAll').checked;
+  var opts={optionalServices:['0000221f-0000-1000-8000-00805f9b34fb','00001f10-0000-1000-8000-00805f9b34fb']};
+  if(scanAll){opts.acceptAllDevices=true;}
+  else{opts.filters=[{namePrefix:'MPP'}];}
+  navigator.bluetooth.requestDevice(opts).then(d=>{
     d.addEventListener('gattserverdisconnected',onDisconnect);
     dev=d;document.getElementById('devName').textContent=d.name;
     return d.gatt.connect()
@@ -824,27 +829,101 @@ async function compactCatalog(){
 
 // ==================== Book upload ====================
 function setBookStat(t){document.getElementById('bookStat').textContent=t}
+
+// ==================== TXT encoding detect + GB2312 transcode ====================
+// The device renders books as GB2312 (HZK16 font); UTF-8 bytes mislabelled
+// GB2312 come out as garbage (and the user reports the device freezing on
+// such books).  So .txt uploads are sniffed for a BOM / UTF-8 / GBK and
+// transcoded to GB2312 before upload.  .bin uploads are treated as raw
+// GB2312 dumps and pass through untouched (legacy behavior).
+
+// Returns 'utf8' | 'utf16le' | 'utf16be' | 'gbk' | 'ascii' | null.
+function txtDetectEncoding(bytes){
+  if(bytes.length>=3&&bytes[0]===0xEF&&bytes[1]===0xBB&&bytes[2]===0xBF)return 'utf8';
+  if(bytes.length>=2&&bytes[0]===0xFF&&bytes[1]===0xFE)return 'utf16le';
+  if(bytes.length>=2&&bytes[0]===0xFE&&bytes[1]===0xFF)return 'utf16be';
+  var hasHi=false;
+  for(var i=0;i<bytes.length;i++){if(bytes[i]>=0x80){hasHi=true;break}}
+  if(!hasHi)return 'ascii';
+  try{new TextDecoder('utf-8',{fatal:true}).decode(bytes);return 'utf8'}catch(e){}
+  try{new TextDecoder('gbk',{fatal:true}).decode(bytes);return 'gbk'}catch(e){}
+  return null;
+}
+
+// Encode a decoded Unicode string as GB2312 bytes (the HZK16 charset on the
+// device).  Code points with no GB2312 glyph (GBK-only chars, emoji, ...)
+// become a full-width space 0xA1A1 so the stream stays valid GB2312 and the
+// page layout is preserved.
+function stringToGb2312(str){
+  if(typeof gb2312EncodeChar!=='function')throw new Error('缺少 web_tools/js/gb2312_map.js，无法转码');
+  var out=[];
+  for(var i=0;i<str.length;){
+    var cp=str.codePointAt(i);i+=cp>0xFFFF?2:1;
+    if(cp<0x80){out.push(cp);continue}
+    var gb=gb2312EncodeChar(cp);
+    if(gb==null){out.push(0xA1,0xA1);continue}
+    if(gb<=0xFF)out.push(gb);else out.push((gb>>8)&0xFF,gb&0xFF);
+  }
+  return new Uint8Array(out);
+}
+
+// Sniff + transcode one book file.  `pick` is the bookEnc select value
+// ('auto' | '0' | '1').  Returns {data, enc, note}; throws when the encoding
+// cannot be identified, or when a manual GB2312 pick contradicts the sniff.
+async function txtPrepareBookFile(fi,pick){
+  var raw=new Uint8Array(await fi.arrayBuffer());
+  var auto=(pick==='auto');
+  if(!/\.txt$/i.test(fi.name||'')){
+    // .bin (or any non-.txt): raw GB2312 dump, bytes pass through as-is.
+    return {data:raw,enc:auto?1:(parseInt(pick,10)||1),note:''};
+  }
+  var det=txtDetectEncoding(raw);
+  if(!auto){
+    var sel=parseInt(pick,10)||1;
+    if(sel===1&&(det==='utf8'||det==='utf16le'||det==='utf16be'))
+      throw new Error('该文件是 '+det.toUpperCase()+' 编码，与所选 GB2312 不符；请改选「自动检测」');
+    return {data:raw,enc:sel,note:''};
+  }
+  if(det==null)throw new Error('无法识别 TXT 编码（既不是 UTF-8 也不是 GBK/GB2312）');
+  if(det==='ascii')return {data:raw,enc:0,note:'纯 ASCII，原样上传'};
+  if(det==='gbk')return {data:raw,enc:1,note:'已识别 GBK/GB2312，原样上传'};
+  var encName=det==='utf8'?'UTF-8':(det==='utf16le'?'UTF-16LE':'UTF-16BE');
+  var dec=new TextDecoder(det==='utf8'?'utf-8':(det==='utf16le'?'utf-16le':'utf-16be'),{fatal:true});
+  var str;
+  try{
+    str=dec.decode(det==='utf8'?raw:raw.subarray(2)); // skip UTF-16 BOM; utf-8 BOM is dropped by the decoder
+  }catch(e){throw new Error('TXT 解码失败（'+encName+'）')}
+  var gb=stringToGb2312(str);
+  return {data:gb,enc:1,note:'已自动转码 '+encName+'→GB2312 ('+raw.length+'B→'+gb.length+'B)'};
+}
+
 async function bookUpload(){
   if(!wrChar){log('未连接');return}
   if(busy){log('设备忙，请等待当前操作完成');return}
   var fi=document.getElementById('bookFile').files[0];if(!fi)return;
   var title=document.getElementById('bookName').value||fi.name;
-  var enc=parseInt(document.getElementById('bookEnc').value);
-  if(typeof catalogTitleEncoding==='function') enc=catalogTitleEncoding(title,enc);
-  var raw=new Uint8Array(await fi.arrayBuffer());
+  var pick=document.getElementById('bookEnc').value;   // 'auto' | '0' | '1'
+  var raw, enc, note;
+  try{
+    var prep=await txtPrepareBookFile(fi,pick);
+    raw=prep.data;enc=prep.enc;note=prep.note;
+  }catch(e){alert(e.message);return}
   if(raw.length>7*1024*1024){alert('>7MB');return}
-  setBookStat('准备...');var bar=document.getElementById('bookBar');bar.style.display='block';bar.max=raw.length;bar.value=0;
+  setBookStat((note?note+' · ':'')+'准备...');var bar=document.getElementById('bookBar');bar.style.display='block';bar.max=raw.length;bar.value=0;
   var tb;
-  if(typeof catalogTitleToBytesAsync==='function') tb=await catalogTitleToBytesAsync(title,enc,19);
-  else if(typeof catalogTitleToBytes==='function') tb=catalogTitleToBytes(title,enc,19);
+  var tel=pick==='auto'?0:parseInt(pick,10);            // title bytes follow the pick; auto grows to GB2312 for CJK titles
+  if(typeof catalogTitleEncoding==='function') tel=catalogTitleEncoding(title,tel);
+  if(typeof catalogTitleToBytesAsync==='function') tb=await catalogTitleToBytesAsync(title,tel,19);
+  else if(typeof catalogTitleToBytes==='function') tb=catalogTitleToBytes(title,tel,19);
   else tb=new TextEncoder().encode(title);
   if(tb.length>19)tb=tb.slice(0,19);
-  if(enc===1&&/[^\x00-\x7F]/.test(title)){
+  if(tel===1&&/[^\x00-\x7F]/.test(title)){
     if(typeof gb2312EncodeChar!=='function'){alert('缺少 web_tools/js/gb2312_map.js，无法编码中文书名');return}
     if(!tb.length){alert('书名 GB2312 编码失败，请 Ctrl+F5 刷新页面后重试');return}
     if(tb[0]>=0xE0){alert('书名仍是 UTF-8 字节（设备会乱码），请 Ctrl+F5 强制刷新页面');return}
     log('书名 GB2312: '+Array.from(tb).map(function(x){return ('0'+x.toString(16)).slice(-2)}).join(' '));
   }
+  if(note)log('TXT '+note);
   var bc=new Uint8Array(6+tb.length);bc[0]=0x10;bc[1]=tb.length;bc.set(tb,2);
   bc[2+tb.length]=(raw.length>>16)&0xff;bc[2+tb.length+1]=(raw.length>>8)&0xff;bc[2+tb.length+2]=raw.length&0xff;bc[2+tb.length+3]=enc;
   var t0=clock_ms();

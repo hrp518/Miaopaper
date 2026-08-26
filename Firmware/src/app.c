@@ -147,8 +147,10 @@ _attribute_ram_code_ void main_loop(void)
      * keeps running and the screen / time / buttons stay live. */
     if (epd_state_handler())  // EPD refresh in progress -> keep awake
     {
-        cpu_set_gpio_wakeup(EPD_BUSY, 1, 1);
-        bls_pm_setWakeupSource(PM_WAKEUP_PAD);
+        /* This branch forces SUSPEND_DISABLE so the MCU never suspends while
+         * the panel is refreshing.  Do NOT touch the BLE stack's wake-up
+         * source here: the stack needs its default (timer + pad) so its
+         * ADV-driven low-power cycle keeps working after the refresh. */
         bls_pm_setSuspendMask(SUSPEND_DISABLE);
     }
     else
@@ -160,7 +162,19 @@ _attribute_ram_code_ void main_loop(void)
         uint16_t timeout_s = g_sleep_timeout_s[settings.sleep_timeout_idx];
 
         if (eb_mode == EB_MODE_LOCK) {
-            allow_sleep = 1;                  // (already) locked -> sleep now
+            /* Locked: sleep only when the EPD is idle and no button is held.
+             * While a button is held we keep SUSPEND_DISABLE so the 10 ms
+             * button scan can process the press (long-press F -> unlock).
+             * The sleep itself is handed to the BLE stack (ADV-driven): it
+             * deep-retention sleeps between advertising events and wakes to
+             * transmit, so the device keeps advertising and stays
+             * discoverable while locked.  No GPIO pad wake-ups are armed --
+             * the analog pulls die in deep retention and the floating pins
+             * would fire spurious wakes (the old self-wake loop). */
+            uint8_t held = !gpio_read(BTN_FRONT_PIN) ||
+                           !gpio_read(BTN_LEFT_PIN)  ||
+                           !gpio_read(BTN_RIGHT_PIN);
+            allow_sleep = !held && !epd_update_state;
         }
         else if (ble_get_connected()) {
             /* A BLE central is connected.  While connected we NEVER auto-lock:
@@ -184,20 +198,24 @@ _attribute_ram_code_ void main_loop(void)
              * (clock / reading / settings / about / select) to LOCK while
              * remembering the previous one for resume after wake.  The actual
              * SUSPEND happens on the NEXT main-loop pass when eb_mode == LOCK
-             * (case above). */
+             * (case above), once the lock-render refresh has settled. */
             ebook_handle_lock();
-            allow_sleep = 1;
+            /* Never sleep on THIS pass: the lock render starts a full EPD
+             * refresh, and suspending mid-refresh leaves the panel stuck
+             * (BUSY low -> epd_update_state=1 forever -> every later redraw
+             * skipped).  Wait for the refresh to finish first. */
+            allow_sleep = !epd_update_state;
         }
 
         if (allow_sleep)
         {
-            /* Configure the 3 active-low buttons as wake-up sources so a
-             * press brings the device out of suspend. */
-            cpu_set_gpio_wakeup(BTN_FRONT_PIN, Level_Low, 1);
-            cpu_set_gpio_wakeup(BTN_LEFT_PIN,  Level_Low, 1);
-            cpu_set_gpio_wakeup(BTN_RIGHT_PIN, Level_Low, 1);
-            bls_pm_setWakeupSource(PM_WAKEUP_PAD);
-            /* Let the BLE stack pick its normal suspend mask. */
+            /* Re-arm the BLE stack's low-power mask (ADV/connection
+             * retention).  blt_sdk_main_loop then sleeps between advertising
+             * events and wakes to transmit, so the locked device keeps
+             * advertising (discoverable) at low power.  Never enter sleep
+             * directly here: a raw cpu_sleep_wakeup bypasses the stack's
+             * power-management bookkeeping and permanently wedges the ADV
+             * scheduler (device becomes undiscoverable). */
             blt_pm_proc();
         }
         else
