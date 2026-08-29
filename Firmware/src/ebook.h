@@ -15,6 +15,16 @@
 #define EB_LOCK_IMG_FLAG_OFFSET  0x0FF0  // valid flag within the same sector (after 4000 byte image, 96 bytes spare)
 #define EB_LOCK_IMG_FLAG_VALUE   0xAA    // written at end of lock-img upload to mark valid
 
+// GBK 扩展大字库(文泉驿点阵宋体 16x16)稀疏字典,置于 Flash 顶部、锁屏图
+// 之前。书库数据上限随之降为 EB_GBK_FONT_ADDR,防止书籍覆盖大字库。
+// 文件格式见 fonts/make_wqy_font.py:32 字节头 + 条目表 + 字形块。
+#define EB_GBK_FONT_ADDR      0x700000
+#define EB_GBK_FONT_HEADER    32
+#define EB_GBK_FONT_MAGIC0    'W'
+#define EB_GBK_FONT_MAGIC1    'Q'
+#define EB_GBK_FONT_MAGIC2    'Y'
+#define EB_GBK_FONT_MAGIC3    '1'
+
 // Per-book reading-progress storage (external NOR flash, append-only ring).
 // Lives in the 4 KB sector just below the lock image.  Book data grows up
 // from 0x041000 and is capped at ~7 MB, so it never reaches here.
@@ -52,6 +62,7 @@
 
 #define EB_ENC_ASCII      0
 #define EB_ENC_GB2312     1
+#define EB_ENC_GBK        2   // GBK 双字节(含繁体),需 GBK 扩展大字库
 
 // Display parameters
 #define EB_DISP_W         250

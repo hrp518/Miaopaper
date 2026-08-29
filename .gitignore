@@ -2,3 +2,8 @@
 Firmware/out/
 Firmware/build.log
 Firmware/build_*.txt
+Firmware/build_*.log
+
+# Upstream WQY BDF sources (regenerable via make_wqy_font.py; ~29MB, not tracked)
+fonts/wqy-bitmapsong/
+fonts/wqy-bitmapsong-bdf-*.tar.gz

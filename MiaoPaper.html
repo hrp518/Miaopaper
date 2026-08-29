@@ -128,6 +128,12 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
       </div>
       <progress class="progress" id="fontBar" value="0" max="100" style="display:none"></progress>
       <span class="fade" id="fontStat"></span>
+      <div class="row" style="margin-top:4px">
+        <input type="file" accept=".bin" id="gbkFontFile" style="flex:1">
+        <button onclick="gbkFontUpload()">上传大字库(GBK/繁体)</button>
+      </div>
+      <progress class="progress" id="gbkFontBar" value="0" max="100" style="display:none"></progress>
+      <span class="fade" id="gbkFontStat"></span>
     </div>
   </div>
   <div class="row" style="margin-top:8px">
@@ -135,7 +141,7 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
       <label>上传书籍</label>
       <div class="row">
         <input placeholder="书名" id="bookName" style="width:140px">
-        <select id="bookEnc"><option value="auto" selected>自动检测</option><option value="0">ASCII</option><option value="1">GB2312</option></select>
+        <select id="bookEnc"><option value="auto" selected>自动检测</option><option value="0">ASCII</option><option value="1">GB2312(简体)</option><option value="2">GBK(繁体)</option></select>
         <input type="file" accept=".txt,.bin" id="bookFile" style="flex:1">
       </div>
       <div class="row" style="margin-top:2px">
@@ -183,47 +189,6 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
   </div>
 </div>
 
-<!-- ========== 分辨率调试 ========== -->
-<h3>📐 分辨率调试</h3>
-<div class="card">
-  <div class="row">
-    <label>Y 值 (0-127):
-      <input type="number" id="dbgY" min="0" max="127" value="64" style="width:60px">
-    </label>
-    <button onclick="dbgDrawLine()">画水平线</button>
-    <button onclick="dbgExit()">退出调试</button>
-  </div>
-  <span class="fade" id="dbgStat" style="font-size:11px"></span>
-  <span class="fade" style="font-size:11px;display:block;margin-top:4px">每次画线前自动清屏白底，慢刷(全GC 0xF7)。退出后回到时钟。</span>
-</div>
-<!-- ========== Flash 诊断（定位上传失败） ========== -->
-<h3>🔬 Flash 诊断</h3>
-<div class="card">
-  <p class="fade" style="margin:0 0 4px">用于排查上传图片/图书无效：确认外挂 SPI Flash 是否应答、锁屏图扇区/标志位实际内容、写功能是否正常。结果输出到下方串口终端 [RxTx] 行。</p>
-  <div class="row">
-    <button onclick="flashDiagJedec()">读 JEDEC ID (0xF3)</button>
-    <button onclick="flashDiagRead()">读锁屏图扇区</button>
-    <button onclick="flashDiagSelfTest()">写自测 (0xF5)</button>
-  </div>
-  <div class="row" style="margin-top:4px">
-    <label>地址(HEX): <input id="dbgFlashAddr" value="7FF000" style="width:90px"></label>
-    <button onclick="flashDiagReadAddr()">读指定地址(0xF4)</button>
-    <span class="fade">结果见终端 [RxTx]</span>
-  </div>
-  <span class="fade" id="flashDiagStat" style="font-size:11px"></span>
-</div>
-
-<!-- ========== PC1 充电状态测试 ========== -->
-<h3>🔌 PC1 充电状态测试</h3>
-<div class="card">
-  <div class="row">
-    <button onclick="pc1Test(0x42)">弱下拉(100K)</button>
-    <button onclick="pc1Test(0x43)">强下拉(输出低)</button>
-    <button onclick="pc1Test(0x44)">高阻</button>
-  </div>
-  <span class="fade" id="pc1Stat" style="font-size:11px"></span>
-</div>
-
 <!-- ========== 4. Terminal ========== -->
 <h3>💬 串口终端</h3>
 <div class="card">
@@ -235,21 +200,10 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
     <label><input type="checkbox" id="termAutoScroll" checked>自动滚动</label>
   </div>
   <div class="log" id="termOut"></div>
-  <div class="row" style="margin-top:4px">
-    <span class="fade" style="margin-left:8px">EPD:</span>
-    <button onclick="rxTx(hexToBytes('E7'))">仅Init</button>
-    <button onclick="rxTx(hexToBytes('E5'))">局Init</button>
-    <button onclick="rxTx(hexToBytes('E6'))">局刷(当前屏)</button>
-    <button onclick="eepromSendE8()">局刷(写底图)</button>
-    <button onclick="rxTx(hexToBytes('E2'))">强制刷新</button>
-    <button onclick="rxTx(hexToBytes('EF'))">分辨率测试</button>
-    <span class="fade" style="margin-left:8px">按键扫描:</span>
-    <button onclick="rxTx(hexToBytes('ED01'))">开</button>
-    <button onclick="rxTx(hexToBytes('ED00'))">关</button>
-  </div>
 </div>
 
 <script src="web_tools/js/gb2312_map.js"></script>
+<script src="web_tools/js/gbk_map.js"></script>
 <script src="web_tools/js/gb2312_codec.js"></script>
 <script>
 // ==================== BLE ====================
@@ -275,8 +229,24 @@ function setBusy(b){
 function log(s){var d=new Date();var el=document.getElementById('termOut');el.textContent+=('['+d.toTimeString().slice(0,8)+'] '+s+'\n');var auto=document.getElementById('termAutoScroll');if(!auto||auto.checked)el.scrollTop=el.scrollHeight}
 function setStatus(c, t){var d=document.getElementById('led');var s=document.getElementById('statusText');d.className='status-dot '+(c?'connected':'disconnected');s.textContent=t}
 
+// 手机/浏览器兼容性自检（只在不支持时提示一次）
+if(!('bluetooth' in navigator)){
+  log('⚠ 本浏览器不支持 Web Bluetooth：手机请用 Android Chrome（HTTPS 访问），iOS Safari 不支持蓝牙传书');
+}else if(location.protocol!=='https:'&&!['localhost','127.0.0.1'].includes(location.hostname)){
+  log('⚠ 当前为 '+location.protocol+'// 第三方访问：Web Bluetooth 需要 HTTPS 或 localhost');
+}
+
 function doConnect(){
   if(conn){doDisconnect();return}
+  if(!('bluetooth' in navigator)){
+    var msg='此浏览器不支持 Web Bluetooth，无法传输。\n\n'+
+      '· 手机：请用 Android Chrome 打开本页，且必须用 HTTPS 访问（GitHub Pages / 局域网 https）\n'+
+      '· iOS Safari 不支持 Web Bluetooth，iPhone 无法用网页传书（需原生 App）\n'+
+      '· 电脑：Chrome / Edge 均可，本地可用 http://localhost';
+    log('⚠ '+msg.replace(/\n/g,' '));
+    alert(msg);
+    return;
+  }
   // 默认只显示名字以 "MPP" 开头的设备（固件广播名 MPP_XXXXXX，见 ble.c）。
   // 勾选"不筛选MPP"后改为显示所有低功耗设备，便于在设备改名/过滤失效时排查。
   var scanAll=document.getElementById('scanAll')&&document.getElementById('scanAll').checked;
@@ -293,7 +263,7 @@ function doConnect(){
       log('Android: 请求 MTU 247...');
       return gatt.requestMTU(247).then(()=>gatt);
     }
-    log('Windows: 等待设备主动协商 MTU（约 0.5s）...');
+    log('等待设备主动协商 MTU（约 0.5s，Android/fast 均可）...');
     return gatt;
   }).then(s=>{
     return gatt.getPrimaryService('0000221f-0000-1000-8000-00805f9b34fb')
@@ -363,7 +333,14 @@ async function sendCmdFast(data){
   // write-without-response: fast, and `await` waits for the link-layer
   // enqueue so back-to-back calls are throttled by the controller (no drops).
   if(!wrChar){log('未连接');return}
-  await wrChar.writeValueWithoutResponse(data)
+  if(typeof wrChar.writeValueWithoutResponse==='function'){
+    await wrChar.writeValueWithoutResponse(data)
+  }else{
+    // 老版 Android Chrome 等没有 Write-Cmd 时退回 Write Request：
+    // 每次一个 RTT，慢但兼容；窗口式上传仍靠固件 fwWritten 应答限速。
+    await wrChar.writeValue(data)
+    await waitMs(3)
+  }
 }
 async function rxTx(data){
   if(!rxChar){log('未连接');return}
@@ -379,6 +356,8 @@ function notifyBytes(data){
 
 function onNotify(data){
   var b=notifyBytes(data);
+  // OTA 大块写能力探测应答(0x05 读回缓冲):一次性 waiter,优先于其他分发
+  if(otaProbeCB!==null){var pr=otaProbeCB,rs=otaProbeResolve;otaProbeCB=null;otaProbeResolve=null;if(rs)rs(b);return}
   if(b.length>0&&b[0]==0x19){statusNotify(b);return}
   if(b.length>0&&b[0]==0x33){lockImgNotify(b);return}
   if(b.length>0&&b[0]==0x34){settingsNotify(b);return}
@@ -432,17 +411,97 @@ function ebookWaitBookSlot(idx,ms){
 
 function bookEntryFrom15(b){
   var idx=b[1],tb=b.slice(2,22),enc=b[25]!=null?b[25]:0;
-  var t=typeof catalogTitleFromNotify==='function'?catalogTitleFromNotify(tb,enc):'';
-  if(!t){for(var i=0;i<tb.length&&tb[i];i++)t+=String.fromCharCode(tb[i]);}
+  var t=titleBytesToText(tb,enc);
   var len=(b[22]<<16)|(b[23]<<8)|b[24];
   return {idx:idx,title:t,len:len,enc:enc,absent:false};
 }
 
 function bookEntryFromFrag(frag){
   var tb=frag.tb,enc=frag.enc;
-  var t=typeof catalogTitleFromNotify==='function'?catalogTitleFromNotify(tb,enc):'';
-  if(!t){for(var i=0;i<tb.length&&tb[i];i++)t+=String.fromCharCode(tb[i]);}
+  var t=titleBytesToText(tb,enc);
   return {idx:frag.idx,title:t,len:frag.len,enc:enc,absent:false};
+}
+
+/* 书名解码（自包含，不依赖 web_tools/js 是否加载成功）。
+ * 固件 enc=1 存 GB2312；enc=0 的书名也可能带高字节（固件 draw_title_string
+ * 会自动识别），所以只要字节 >=0x80 就先按 GBK 解，再试严格 UTF-8，最后才
+ * 退回逐字节（遇到 "杜甫传" 被解成 "¶Å¸¦´«" 的手机问题就是上一版这里依赖了
+ * gb2312_codec.js，加载失败时走了 String.fromCharCode 裸字节路径）。 */
+function titleBytesToText(tb, enc){
+  var n=0;while(n<tb.length&&tb[n])n++;
+  if(!n)return '';
+  var i,hi=false;
+  for(i=0;i<n;i++){if(tb[i]>=0x80){hi=true;break}}
+  if(!hi){var s='';for(i=0;i<n;i++)s+=String.fromCharCode(tb[i]);return s}
+  try{return new TextDecoder('gbk').decode(tb.subarray(0,n))}catch(e){}
+  try{return new TextDecoder('utf-8',{fatal:true}).decode(tb.subarray(0,n))}catch(e){}
+  var s2='';for(i=0;i<n;i++)s2+=String.fromCharCode(tb[i]);return s2;
+}
+
+/* 书名编码兜底：web_tools/js/gb2312_codec.js 未加载（手机端局部加载失败）但
+ * gb2312_map.js 已加载时，中文书名仍按 GB2312 编码上传，不落到 UTF-8。
+ * 逻辑与 gb2312_codec.js 的 catalogTitleToBytes 一致。 */
+function titleToGb2312Reserve(title, enc, maxLen){
+  maxLen=maxLen||19;
+  enc=enc|0; title=title||'';
+  var out=[],i,cp,gb;
+  if(enc===0){
+    for(i=0;i<title.length&&out.length<maxLen;i++){
+      cp=title.charCodeAt(i);
+      if(cp<0x80)out.push(cp);
+    }
+    return new Uint8Array(out);
+  }
+  for(i=0;i<title.length;){
+    cp=title.codePointAt(i);i+=cp>0xFFFF?2:1;
+    if(cp<0x80){
+      if(out.length>=maxLen)break;
+      out.push(cp);
+      continue;
+    }
+    gb=gb2312EncodeChar(cp);
+    if(gb==null)break;
+    if(gb<=0xFF){
+      if(out.length>=maxLen)break;
+      out.push(gb);
+    }else{
+      if(out.length+2>maxLen)break;
+      out.push((gb>>8)&0xFF,gb&0xFF);
+    }
+  }
+  return new Uint8Array(out);
+}
+
+/* 书名 GBK 编码兜底（繁体书名）：走 gbk_map.js 的 gbkEncodeChar。 */
+function titleToGbkReserve(title, enc, maxLen){
+  maxLen=maxLen||19;
+  enc=enc|0; title=title||'';
+  var out=[],i,cp,gb;
+  if(enc===0){
+    for(i=0;i<title.length&&out.length<maxLen;i++){
+      cp=title.charCodeAt(i);
+      if(cp<0x80)out.push(cp);
+    }
+    return new Uint8Array(out);
+  }
+  for(i=0;i<title.length;){
+    cp=title.codePointAt(i);i+=cp>0xFFFF?2:1;
+    if(cp<0x80){
+      if(out.length>=maxLen)break;
+      out.push(cp);
+      continue;
+    }
+    gb=gbkEncodeChar(cp);
+    if(gb==null)break;
+    if(gb<=0xFF){
+      if(out.length>=maxLen)break;
+      out.push(gb);
+    }else{
+      if(out.length+2>maxLen)break;
+      out.push((gb>>8)&0xFF,gb&0xFF);
+    }
+  }
+  return new Uint8Array(out);
 }
 
 function handleBook15Notify(b){
@@ -488,34 +547,53 @@ function handleBook15Notify(b){
 // the firmware, losing an occasional notify only delays the ack, never corrupts
 // data (the next notify carries the up-to-date cumulative count).
 var fwWritten=0;
+var otaFailFlag=0;   // 设备端 OTA 校验失败通知(0x08)
+var otaDevCRC=-1;    // 设备端算出的实际校验和
+var otaFlashStarted=0;  // 设备端确认刷写开始(0x09)
+var otaProbeCB=null,otaProbeResolve=null;  // OTA 0x05 读回探测的一次性 waiter
+function otaProbeRead(timeout){
+  timeout=timeout||800;
+  return new Promise(function(resolve){
+    otaProbeCB=1;otaProbeResolve=resolve;
+    setTimeout(function(){if(otaProbeCB!==null){otaProbeCB=null;var r=otaProbeResolve;otaProbeResolve=null;if(r)r(null)}},timeout);
+  });
+}
 function ebookNotify(b){
   var cmd=b[0];
   if(cmd==0x10&&b.length>=3){if(ebookCB==0x10){ebookResolve(b);ebookCB=null}}
   else if(cmd==0x12&&b.length>=6){if(ebookCB==0x12){ebookResolve(b);ebookCB=null}}
+  else if(cmd==0x08&&b.length>=3){otaFailFlag=1;otaDevCRC=((b[1]<<8)|b[2])&0xffff;log('OTA 设备端校验和: 0x'+('000'+otaDevCRC.toString(16)).slice(-4));}
+  else if(cmd==0x09){otaFlashStarted=1;log('OTA 设备确认: 刷写开始,即将重启');}
   else if(cmd==0x14&&b.length>=2){
     entryCount=b[1];entries=[];
     if(ebookCB==0x14){if(listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}ebookResolve(b);ebookCB=null}}
   else if(cmd==0x15){handleBook15Notify(b)}
-  else if((cmd==0x11||cmd==0x17)&&b.length>=4){
+  else if((cmd==0x11||cmd==0x17||cmd==0x1C)&&b.length>=4){
     var w=(b[1]<<16)|(b[2]<<8)|b[3];
     if(w>fwWritten)fwWritten=w;          // monotonic high-water mark
     if(cmd==0x17){setFontStat('已写: '+w+' B');var p=document.getElementById('fontBar');if(p&&p.style.display!='none'){p.value=Math.min(p.max,w)}}
+    else if(cmd==0x1C){setGbkFontStat('已写: '+w+' B');var pg=document.getElementById('gbkFontBar');if(pg&&pg.style.display!='none'){pg.value=Math.min(pg.max,w)}}
   }
   else if(cmd==0x18&&b.length>=2){if(ebookCB==0x18){ebookResolve(b);ebookCB=null}}
+  else if(cmd==0x1D&&b.length>=2){if(ebookCB==0x1D){ebookResolve(b);ebookCB=null}}
   else if(cmd==0x20&&b.length>=2){if(ebookCB==0x20){ebookResolve(b);ebookCB=null}}
   else if(cmd==0x13&&b.length>=2){if(ebookCB==0x13){ebookResolve(b);ebookCB=null}}
   else if(cmd==0x1A&&b.length>=2){if(ebookCB==0x1A){ebookResolve(b);ebookCB=null}}
 }
 
+var gbkFontInstalled=0;   // 设备是否已装 WQY_GBK16.bin 大字库(由 statusNotify 更新)
 function statusNotify(b){
   if(b.length<4)return;
   var fontOk=b[1]?1:0,bookCnt=b[2],lockOk=b[3]?1:0;
   var devMtu=b.length>=5?b[4]:0;
-  var f=fontOk?'<span style="color:#3fb950">✔ 字库已安装</span>':'<span style="color:#f85149">✘ 未安装</span>';
+  var gbkOk=b.length>=6?b[5]:0;
+  gbkFontInstalled=gbkOk?1:0;
+  var f=fontOk?'<span style="color:#3fb950">✔ 字库</span>':'<span style="color:#f85149">✘ 字库</span>';
+  var g=gbkOk?'<span style="color:#3fb950">✔ 大字库</span>':'<span style="color:#8b949e">无大字库</span>';
   var bk=bookCnt>0?'<span style="color:#3fb950">'+bookCnt+' 本书</span>':'<span style="color:#f85149">无书</span>';
   var lk=lockOk?'<span style="color:#3fb950">✔ 锁屏图</span>':'<span style="color:#8b949e">无锁屏图</span>';
   var mtuInfo=devMtu?(' &nbsp;|&nbsp; 设备ATT MTU='+devMtu):'';
-  document.getElementById('flashStat').innerHTML=f+' &nbsp;|&nbsp; '+bk+' &nbsp;|&nbsp; '+lk+mtuInfo;
+  document.getElementById('flashStat').innerHTML=f+' &nbsp;|&nbsp; '+g+' &nbsp;|&nbsp; '+bk+' &nbsp;|&nbsp; '+lk+mtuInfo;
   if(devMtu)log('设备 ATT MTU='+devMtu+'，浏览器 payload max='+blePayloadMax);
   if(devMtu>23&&blePayloadMax<=20){
     log('⚠ Windows Chrome 无法使用大 MTU（payload 仍=20），上传会很慢。请用 web_tools/mpp_upload.py（bleak）或 Android Chrome。');
@@ -671,50 +749,6 @@ async function saveSettings(){
   setBusy(false);
 }
 
-// ==================== Resolution debug tool (0x40 draw line / 0x41 exit) ====================
-// Send [0x40][y_hi][y_lo] (big-endian Y). Firmware clears screen to white,
-// draws a full-width black line at Y, does a slow full-GC refresh, and echoes
-// [0x40][0x00][clamped_y] back.
-async function dbgDrawLine(){
-  if(busy){log('设备忙');return}
-  var y=parseInt(document.getElementById('dbgY').value);
-  if(isNaN(y))y=64;
-  if(y<0)y=0; if(y>127)y=127;
-  document.getElementById('dbgStat').textContent='画线 y='+y+' ...';
-  setBusy(true);
-  try{
-    var ew=ebookWait(0x40,5000);
-    await sendCmd(new Uint8Array([0x40,(y>>8)&0xff,y&0xff]));
-    var r=await ew;
-    document.getElementById('dbgStat').textContent='✅ 已画 y='+r[2]+' (设备回显)';
-  }catch(e){document.getElementById('dbgStat').textContent='画线超时/失败';}
-  setBusy(false);
-}
-async function dbgExit(){
-  if(busy){log('设备忙');return}
-  document.getElementById('dbgStat').textContent='退出调试...';
-  setBusy(true);
-  try{var ew=ebookWait(0x41,3000);await sendCmd(new Uint8Array([0x41]));await ew;document.getElementById('dbgStat').textContent='✅ 已退出，回时钟';}catch(e){document.getElementById('dbgStat').textContent='退出超时';}
-  setBusy(false);
-}
-
-// ==================== PC1 charge-status pin test (0x42/0x43/0x44) ====================
-async function pc1Test(cmd){
-  if(busy){log('设备忙');return}
-  var labels={0x42:'弱下拉(100K)',0x43:'强下拉(输出低)',0x44:'高阻'};
-  document.getElementById('pc1Stat').textContent=labels[cmd]+' 读取中...';
-  setBusy(true);
-  try{
-    var ew=ebookWait(cmd,3000);
-    await sendCmd(new Uint8Array([cmd]));
-    var r=await ew;
-    var lvl=r[1]?'高(1)':'低(0)';
-    document.getElementById('pc1Stat').textContent=labels[cmd]+' -> 电平: '+lvl;
-    log('PC1 '+labels[cmd]+' = '+lvl);
-  }catch(e){document.getElementById('pc1Stat').textContent=labels[cmd]+' 超时';}
-  setBusy(false);
-}
-
 // ==================== Time ====================
 function setTime(){
   var n=new Date();
@@ -827,6 +861,30 @@ async function compactCatalog(){
   try{var ew=ebookWait(0x1A,3000);await sendCmd(new Uint8Array([0x1A]));await ew}catch(e){}
 }
 
+// ---- GBK 大字库上传 (WQY_GBK16.bin) ----
+function setGbkFontStat(t){document.getElementById('gbkFontStat').textContent=t}
+async function gbkFontUpload(){
+  if(!wrChar){log('未连接');return}
+  if(busy){log('设备忙，请等待当前操作完成');return}
+  var f=document.getElementById('gbkFontFile').files[0];if(!f)return;
+  var b=new Uint8Array(await f.arrayBuffer());
+  setGbkFontStat('准备...');var bar=document.getElementById('gbkFontBar');bar.style.display='block';bar.max=b.length;bar.value=0;
+  var t0=clock_ms();
+  setBusy(true);
+  try{
+    try{await sendCmd(new Uint8Array([0x1B,(b.length>>16)&0xff,(b.length>>8)&0xff,b.length&0xff]))}catch(e){setGbkFontStat('begin失败');return}
+    await streamUpload(0x1C,b,bar,function(w,tot){setGbkFontStat('上传中 '+w+'/'+tot+' ('+(w*100/tot).toFixed(1)+'%)')});
+    var secs=((clock_ms()-t0)/1000).toFixed(1);
+    try{var ew1d=ebookWait(0x1D,5000);await sendCmd(new Uint8Array([0x1D]));var ack1d=await ew1d;
+      if(ack1d[1]==0x00)setGbkFontStat('✅ 完成 '+b.length+' B / '+secs+'s');
+      else if(ack1d[1]==0x04)setGbkFontStat('✘ magic 校验失败：请选择 WQY_GBK16.bin');
+      else setGbkFontStat('end 拒绝 status=0x'+ack1d[1].toString(16));
+    }catch(e){setGbkFontStat('end超时')}
+  }catch(e){setGbkFontStat('上传失败: '+(e.message||e));log('gbkFontUpload err: '+e)}
+  finally{setBusy(false);bar.style.display='none'}
+  setTimeout(queryStatus,500)
+}
+
 // ==================== Book upload ====================
 function setBookStat(t){document.getElementById('bookStat').textContent=t}
 
@@ -837,7 +895,7 @@ function setBookStat(t){document.getElementById('bookStat').textContent=t}
 // transcoded to GB2312 before upload.  .bin uploads are treated as raw
 // GB2312 dumps and pass through untouched (legacy behavior).
 
-// Returns 'utf8' | 'utf16le' | 'utf16be' | 'gbk' | 'ascii' | null.
+// Returns 'utf8' | 'utf16le' | 'utf16be' | 'gbk' | 'big5' | 'ascii' | null.
 function txtDetectEncoding(bytes){
   if(bytes.length>=3&&bytes[0]===0xEF&&bytes[1]===0xBB&&bytes[2]===0xBF)return 'utf8';
   if(bytes.length>=2&&bytes[0]===0xFF&&bytes[1]===0xFE)return 'utf16le';
@@ -847,54 +905,113 @@ function txtDetectEncoding(bytes){
   if(!hasHi)return 'ascii';
   try{new TextDecoder('utf-8',{fatal:true}).decode(bytes);return 'utf8'}catch(e){}
   try{new TextDecoder('gbk',{fatal:true}).decode(bytes);return 'gbk'}catch(e){}
+  try{new TextDecoder('big5',{fatal:true}).decode(bytes);return 'big5'}catch(e){}
   return null;
 }
 
-// Encode a decoded Unicode string as GB2312 bytes (the HZK16 charset on the
-// device).  Code points with no GB2312 glyph (GBK-only chars, emoji, ...)
-// become a full-width space 0xA1A1 so the stream stays valid GB2312 and the
-// page layout is preserved.
-function stringToGb2312(str){
-  if(typeof gb2312EncodeChar!=='function')throw new Error('缺少 web_tools/js/gb2312_map.js，无法转码');
+// Encode a decoded Unicode string as GBK bytes (GB2312 superset: keeps 繁体).
+// Code points with no GBK glyph (emoji, rare CJK, ...) become a full-width
+// space 0xA1A1 so the stream stays valid GBK.
+function stringToGbk(str){
+  if(typeof gbkEncodeChar!=='function')throw new Error('缺少 web_tools/js/gbk_map.js，无法转码');
   var out=[];
   for(var i=0;i<str.length;){
     var cp=str.codePointAt(i);i+=cp>0xFFFF?2:1;
     if(cp<0x80){out.push(cp);continue}
-    var gb=gb2312EncodeChar(cp);
+    var gb=gbkEncodeChar(cp);
     if(gb==null){out.push(0xA1,0xA1);continue}
     if(gb<=0xFF)out.push(gb);else out.push((gb>>8)&0xFF,gb&0xFF);
   }
   return new Uint8Array(out);
 }
 
+// 文本里是否存在 GB2312 没有、但 GBK 有的字符(繁体/生僻字)?
+// 有 → 必须用 GBK 模式上传,否则会被替换成空格。
+function needsGbkChars(str){
+  for(var i=0;i<str.length;){
+    var cp=str.codePointAt(i);i+=cp>0xFFFF?2:1;
+    if(cp<0x80)continue;
+    if(typeof gb2312EncodeChar==='function'&&gb2312EncodeChar(cp)!=null)continue;
+    if(typeof gbkEncodeChar==='function'&&gbkEncodeChar(cp)!=null)return true;
+  }
+  return false;
+}
+
+// 裸 GBK/GB2312 字节流里是否存在非 GB2312 码位(首字节 0x81-0xA0 / 0xA8-0xA9
+// 低字节 <0xA1 / 0xAA-0xAF / 0xF8-0xFE 等扩展区)。
+function bytesNeedGbk(raw){
+  for(var i=0;i<raw.length;i++){
+    var h=raw[i];
+    if(h>=0x81){
+      var t=raw[i+1];
+      if(t>=0x40&&t<=0xFE&&t!==0x7F){
+        if(!(t>=0xA1&&((h>=0xA1&&h<=0xA9)||(h>=0xB0&&h<=0xF7))))return true;
+        i++;
+      }
+    }
+  }
+  return false;
+}
+
 // Sniff + transcode one book file.  `pick` is the bookEnc select value
-// ('auto' | '0' | '1').  Returns {data, enc, note}; throws when the encoding
-// cannot be identified, or when a manual GB2312 pick contradicts the sniff.
+// ('auto' | '0' | '1' | '2').  Returns {data, enc, note}; throws when the
+// encoding cannot be identified, or when a manual pick contradicts the sniff.
 async function txtPrepareBookFile(fi,pick){
   var raw=new Uint8Array(await fi.arrayBuffer());
   var auto=(pick==='auto');
   if(!/\.txt$/i.test(fi.name||'')){
-    // .bin (or any non-.txt): raw GB2312 dump, bytes pass through as-is.
+    // .bin (or any non-.txt): raw dump, bytes pass through as-is.
     return {data:raw,enc:auto?1:(parseInt(pick,10)||1),note:''};
   }
   var det=txtDetectEncoding(raw);
   if(!auto){
-    var sel=parseInt(pick,10)||1;
-    if(sel===1&&(det==='utf8'||det==='utf16le'||det==='utf16be'))
-      throw new Error('该文件是 '+det.toUpperCase()+' 编码，与所选 GB2312 不符；请改选「自动检测」');
+    var sel=parseInt(pick,10)||0;
+    if(sel===2){
+      // GBK(繁体): pass GBK as-is; transcode UTF-8/UTF-16/Big5 -> GBK.
+      if(det==='gbk')return {data:raw,enc:2,note:'已识别 GBK，原样上传'};
+      if(det==='ascii')return {data:raw,enc:0,note:'纯 ASCII，原样上传'};
+      if(det==='big5'){var g5=stringToGbk(new TextDecoder('big5').decode(raw));
+        return {data:g5,enc:2,note:'已自动转码 Big5→GBK ('+raw.length+'B→'+g5.length+'B)'};}
+      var encName=det==='utf8'?'UTF-8':(det==='utf16le'?'UTF-16LE':'UTF-16BE');
+      var dec=new TextDecoder(det==='utf8'?'utf-8':(det==='utf16le'?'utf-16le':'utf-16be'),{fatal:true});
+      var str;
+      try{str=dec.decode(det==='utf8'?raw:raw.subarray(2))}catch(e){throw new Error('TXT 解码失败（'+encName+'）')}
+      var gb=stringToGbk(str);
+      return {data:gb,enc:2,note:'已自动转码 '+encName+'→GBK ('+raw.length+'B→'+gb.length+'B)'};
+    }
+    if(sel===1&&(det==='utf8'||det==='utf16le'||det==='utf16be'||det==='big5'))
+      throw new Error('该文件是 '+det.toUpperCase()+' 编码，与所选 GB2312 不符；请改选「自动检测」或「GBK(繁体)」');
     return {data:raw,enc:sel,note:''};
   }
-  if(det==null)throw new Error('无法识别 TXT 编码（既不是 UTF-8 也不是 GBK/GB2312）');
+  if(det==null)throw new Error('无法识别 TXT 编码（既不是 UTF-8 也不是 GBK/GB2312/Big5）');
   if(det==='ascii')return {data:raw,enc:0,note:'纯 ASCII，原样上传'};
-  if(det==='gbk')return {data:raw,enc:1,note:'已识别 GBK/GB2312，原样上传'};
+  if(det==='gbk'){
+    // 已是 GBK/GB2312 字节:扫描是否含非 GB2312 码位(繁体等)。
+    return bytesNeedGbk(raw)
+      ? {data:raw,enc:2,note:'已识别 GBK(含繁体/生僻字)，原样上传'}
+      : {data:raw,enc:1,note:'已识别 GB2312/GBK(简体)，原样上传'};
+  }
+  if(det==='big5'){
+    var str5=new TextDecoder('big5').decode(raw);
+    if(needsGbkChars(str5)){
+      var g5=stringToGbk(str5);
+      return {data:g5,enc:2,note:'已自动转码 Big5→GBK(含繁体) ('+raw.length+'B→'+g5.length+'B)'};
+    }
+    var g5s=stringToGb2312(str5);
+    return {data:g5s,enc:1,note:'已自动转码 Big5→GB2312(纯简体) ('+raw.length+'B→'+g5s.length+'B)'};
+  }
   var encName=det==='utf8'?'UTF-8':(det==='utf16le'?'UTF-16LE':'UTF-16BE');
   var dec=new TextDecoder(det==='utf8'?'utf-8':(det==='utf16le'?'utf-16le':'utf-16be'),{fatal:true});
   var str;
   try{
     str=dec.decode(det==='utf8'?raw:raw.subarray(2)); // skip UTF-16 BOM; utf-8 BOM is dropped by the decoder
   }catch(e){throw new Error('TXT 解码失败（'+encName+'）')}
+  if(needsGbkChars(str)){
+    var gbk2=stringToGbk(str);
+    return {data:gbk2,enc:2,note:'已自动转码 '+encName+'→GBK(含繁体/生僻字) ('+raw.length+'B→'+gbk2.length+'B)'};
+  }
   var gb=stringToGb2312(str);
-  return {data:gb,enc:1,note:'已自动转码 '+encName+'→GB2312 ('+raw.length+'B→'+gb.length+'B)'};
+  return {data:gb,enc:1,note:'已自动转码 '+encName+'→GB2312(简体) ('+raw.length+'B→'+gb.length+'B)'};
 }
 
 async function bookUpload(){
@@ -908,13 +1025,19 @@ async function bookUpload(){
     var prep=await txtPrepareBookFile(fi,pick);
     raw=prep.data;enc=prep.enc;note=prep.note;
   }catch(e){alert(e.message);return}
+  if(enc===2&&!gbkFontInstalled)
+    log('⚠ 该书含繁体/生僻字，已自动用 GBK 编码上传，但设备尚未安装大字库(WQY_GBK16.bin)，生僻字会显示为空白');
   if(raw.length>7*1024*1024){alert('>7MB');return}
   setBookStat((note?note+' · ':'')+'准备...');var bar=document.getElementById('bookBar');bar.style.display='block';bar.max=raw.length;bar.value=0;
   var tb;
   var tel=pick==='auto'?0:parseInt(pick,10);            // title bytes follow the pick; auto grows to GB2312 for CJK titles
   if(typeof catalogTitleEncoding==='function') tel=catalogTitleEncoding(title,tel);
-  if(typeof catalogTitleToBytesAsync==='function') tb=await catalogTitleToBytesAsync(title,tel,19);
+  if(enc===2)tel=2;                                     // 自动检测到繁体 → 书名也按 GBK 编码
+  if(tel===2&&typeof gbkEncodeChar==='function'){
+    tb=titleToGbkReserve(title,tel,19);
+  }else if(typeof catalogTitleToBytesAsync==='function') tb=await catalogTitleToBytesAsync(title,tel,19);
   else if(typeof catalogTitleToBytes==='function') tb=catalogTitleToBytes(title,tel,19);
+  else if(typeof gb2312EncodeChar==='function') tb=titleToGb2312Reserve(title,tel,19);
   else tb=new TextEncoder().encode(title);
   if(tb.length>19)tb=tb.slice(0,19);
   if(tel===1&&/[^\x00-\x7F]/.test(title)){
@@ -922,6 +1045,10 @@ async function bookUpload(){
     if(!tb.length){alert('书名 GB2312 编码失败，请 Ctrl+F5 刷新页面后重试');return}
     if(tb[0]>=0xE0){alert('书名仍是 UTF-8 字节（设备会乱码），请 Ctrl+F5 强制刷新页面');return}
     log('书名 GB2312: '+Array.from(tb).map(function(x){return ('0'+x.toString(16)).slice(-2)}).join(' '));
+  }else if(tel===2&&/[^\x00-\x7F]/.test(title)){
+    if(typeof gbkEncodeChar!=='function'){alert('缺少 web_tools/js/gbk_map.js，无法编码繁体书名');return}
+    if(!tb.length){alert('书名 GBK 编码失败，请 Ctrl+F5 刷新页面后重试');return}
+    log('书名 GBK: '+Array.from(tb).map(function(x){return ('0'+x.toString(16)).slice(-2)}).join(' '));
   }
   if(note)log('TXT '+note);
   var bc=new Uint8Array(6+tb.length);bc[0]=0x10;bc[1]=tb.length;bc.set(tb,2);
@@ -973,7 +1100,7 @@ function renderBookTable(){
   }
   var h='<table><tr><th>#</th><th>书名</th><th>编码</th><th>大小</th><th>操作</th></tr>';
   for(var i=0;i<entries.length;i++){
-    var e=entries[i];var es=e.enc==0?'ASCII':'GB2312';var sz=e.len<1024?e.len+'B':(e.len/1024).toFixed(1)+'KB';
+    var e=entries[i];var es=e.enc==0?'ASCII':(e.enc==2?'GBK':'GB2312');var sz=e.len<1024?e.len+'B':(e.len/1024).toFixed(1)+'KB';
     h+='<tr><td>'+e.idx+'</td><td>'+(e.title||'书#'+e.idx)+'</td><td>'+es+'</td><td>'+sz+'</td>'+
        '<td><button onclick="bookOpen('+e.idx+')">打开</button> <button onclick="bookDel('+e.idx+')">删</button></td></tr>';
   }
@@ -1139,47 +1266,11 @@ function termSend(){
   rxTx(data);document.getElementById('termIn').value=''
 }
 
-// ==================== Flash diagnostics ====================
-// These all run over the RxTx characteristic, which the firmware routes to
-// cmd_parser (0xF3 JEDEC / 0xF4 read / 0xF5 write-self-test).  Replies come
-// back as text on the same channel and are shown in the terminal as [RxTx].
-async function flashDiagJedec(){
-  if(!rxChar){document.getElementById('flashDiagStat').textContent='未连接';return}
-  document.getElementById('flashDiagStat').textContent='读取 JEDEC ID...（看终端）';
-  log('=== 读 JEDEC ID (0xF3) === 期待: EF 40 17 (W25Q64) / C8 40 17 (GD25Q64)');
-  try{await rxTx(new Uint8Array([0xF3]))}catch(e){log('发送失败: '+e)}
-}
-async function flashDiagRead(){
-  if(!rxChar){document.getElementById('flashDiagStat').textContent='未连接';return}
-  document.getElementById('flashDiagStat').textContent='读锁屏图扇区...（看终端）';
-  log('=== 读锁屏图: 0x7FF000(图头16B) / 0x7FFFA0(图尾16B) / 0x7FFFF0(标志16B) ===');
-  try{
-    await rxTx(hexToBytes('F47FF00010'));  // image head
-    await waitMs(150);
-    await rxTx(hexToBytes('F47FFFA010'));  // image tail (4000 bytes)
-    await waitMs(150);
-    await rxTx(hexToBytes('F47FFFF010'));  // flag area (offset 0xFF0)
-  }catch(e){log('发送失败: '+e)}
-}
-async function flashDiagReadAddr(){
-  if(!rxChar){document.getElementById('flashDiagStat').textContent='未连接';return}
-  var a=document.getElementById('dbgFlashAddr').value.replace(/\s/g,'');
-  if(!/^[0-9A-Fa-f]{6}$/.test(a)){document.getElementById('flashDiagStat').textContent='地址需6位HEX';return}
-  document.getElementById('flashDiagStat').textContent='读 0x'+a.toUpperCase()+'...（看终端）';
-  log('=== 读 0x'+a.toUpperCase()+' (0xF4) ===');
-  try{await rxTx(hexToBytes('F4'+a+'10'))}catch(e){log('发送失败: '+e)}
-}
-async function flashDiagSelfTest(){
-  if(!rxChar){document.getElementById('flashDiagStat').textContent='未连接';return}
-  document.getElementById('flashDiagStat').textContent='写自测...（看终端）';
-  log('=== Flash 写自测 (0xF5): 在 0x7FE000 擦→写测试串→回读 ===');
-  try{await rxTx(new Uint8Array([0xF5]))}catch(e){log('发送失败: '+e)}
-}
-
 // ==================== Firmware ====================
 async function fwSend(){
   if(!wrChar){log('未连接');return}
   if(busy){log('设备忙，请等待当前操作完成');return}
+  log('OTA: 原版ATC方案(240B大块写 + 50ms银行延时 + 设备端CRC校验) —— 若看不到此行说明是旧缓存页，请 Ctrl+F5');
   var f=document.getElementById('fwFile').files[0];if(!f)return;
   var b=new Uint8Array(await f.arrayBuffer());
   // Validate: first 4 bytes must be KNL header (4b4e4c54)
@@ -1189,37 +1280,56 @@ async function fwSend(){
   ta.value='固件大小: '+(b.length/1024).toFixed(1)+' KB, 擦除中...';
   setBusy(true);
 
-  // Erase firmware area (0x20000..0x80000, in 4KB blocks)
+  // OTA 大块写能力探测:先发 240B 的 0x03,再经 0x05 读回缓冲偏移 0x20。
+  // 若 240B 被完整接收,读回字节为 0xAA;若浏览器实际只接受 20B(静默截断),
+  // 0x20 之后的字节为 0。随后 0x01 擦除会 memset 缓冲并复位 ram_position,
+  // 探测数据无残留。原版 ATC 网页就是 240B 大块写 —— Chrome 在 MTU 协商后
+  // 实际接受 ~244B(maxWriteValueLength() 只反映协商前的默认值 20,是假值)。
+  var bigOk=false;
+  try{
+    await sendCmd(hexToBytes('03'+'aa'.repeat(240)));
+    var pr=otaProbeRead();
+    await sendCmd(hexToBytes('0500000020'));
+    var rb=await pr;
+    bigOk=!!(rb&&rb.length>0&&rb[0]===0xaa);
+  }catch(e){bigOk=false}
+  log(bigOk?'大块写探测: 240B 完整接收,采用原版 ATC 大块方案(快)':'大块写探测: 浏览器仅支持小块,回退 19B 方案(慢但稳)');
+
+  // Erase firmware area (0x20000..0x40000, in 4KB blocks) —— 与原版 ATC 网页一致
   var eraseAddr=0x20000;
-  while(eraseAddr<0x80000){
+  while(eraseAddr<0x40000){
     var eraseCmd=new Uint8Array([0x01,(eraseAddr>>16)&0xff,(eraseAddr>>8)&0xff,eraseAddr&0xff]);
     try{await sendCmd(eraseCmd)}catch(e){ta.value='擦除失败';setBusy(false);return}
     eraseAddr+=0x1000;
   }
   ta.value='擦除完成，写入中...';
 
-  // Send data using old OTA protocol: 0x03 for data chunks, 0x02 for bank write
-  // Each bank is 512 bytes (0x200 hex chars);
-  // 0x03 + hex data sends data to buffer, 0x02 + hex address writes buffer to flash.
   ta.value='写入中...';
   startTime=new Date().getTime();
   fwSizeComplete=hexStr.length;
   fwBytesTransmited=0;
 
-  var bankSize=0x200;  // 512 bytes per bank
+  // Send data using the ORIGINAL ATC web page scheme (sendPart/sendFile):
+  //   - each 0x03 write carries 240 bytes (480 hex chars) when big writes are
+  //     supported (device negotiated ATT MTU 247 -> browser accepts ~244B
+  //     writes; maxWriteValueLength()=20 only reflects the pre-negotiation
+  //     default and is a lie after the MTU exchange);
+  //   - one 0x02 bank write per 256B bank;
+  //   - 50ms pause after each bank write (gives the flash time, paces the link).
+  //   Whole image = ~530 writes instead of ~7000 tiny 19B writes -> far fewer
+  //   chances for the link to drop a packet.
+  // 银行大小必须 = 0x100 (256B):设备端 ota.c 的 ramd_to_flash_temp_buffer 只有
+  // 256B,case 3 写入超出即 return 0 丢弃。
+  var bankSize=0x100;  // 256 bytes per bank,匹配设备缓冲区
+  var chunkLen=bigOk?240:19;   // bytes per 0x03 write (原版 ATC 用 240)
+  var partLen=chunkLen*2;      // hex chars per write
   var pos=0;
   while(pos<b.length){
     // Collect up to bankSize bytes for this bank
     var chunk=b.slice(pos,Math.min(pos+bankSize,b.length));
     var chunkHex=bytesToHex(chunk);
 
-    // Send data chunks (0x03 + hex data).  Chunk size is derived from the
-    // negotiated MTU: payload = MTU-3, minus 1 byte for the 0x03 opcode, the
-    // rest is ASCII hex so each chunk carries (payload-1)/2 binary bytes.
-    // At MTU 247 that's ~121 bytes/chunk vs the old fixed 240 hex chars that
-    // got fragmented across many MTU-23 packets.
-    var binPerChunk=Math.max(20,Math.floor((blePayloadMax-1)/2));
-    var partLen=binPerChunk*2;  // hex chars per write
+    // Send data chunks (0x03 + hex data)
     var dataHex=chunkHex;
     while(dataHex.length>0){
       var curLen=Math.min(partLen,dataHex.length);
@@ -1233,27 +1343,37 @@ async function fwSend(){
     var bankAddr=0x20000+pos;
     var addrHex=decimalToHex(bankAddr,8);
     try{await sendCmd(hexToBytes('02'+addrHex))}catch(e){ta.value='写入失败';setBusy(false);return}
-    // No fixed delay: WWR backpressure (await) already paces the data stream.
+    await waitMs(50);   // 与原版 ATC 一致:每银行写入后延时 50ms
     pos+=bankSize;
     var pct=(pos/b.length*100).toFixed(1);
     var elapsed=((new Date().getTime()-startTime)/1000).toFixed(1);
     ta.value='写入: '+pos+'/'+b.length+' ('+pct+'%) '+elapsed+'s';
   }
 
-  // CRC check and final write
-  var crc=calculateCRC(hexStr);
-  ta.value='校验CRC='+crc+'...';
-  /* NOTE: do NOT send the 0x06 CRC-check command here.
-     The firmware's cmd-7 (final flash) guards write_ota_firmware_to_flash()
-     with (out_buffer[5]==crc_out>>8 && out_buffer[6]==crc_out&0xff).
-     crc_out is reset to 0 during erase/write and out_buffer stays zeroed,
-     so the guard passes only while crc_out==0.  Issuing 0x06 would populate
-     crc_out with the real checksum and make the guard fail, leaving the
-     device NOT flashed and NOT rebooting.  This matches the reference
-     OTA_writing.html, which calls only doFinalFlash(). */
-  try{await doFinalFlash(crc)}catch(e){}
+  // 最终刷写:设备端(cmd 7)会重新计算 OTA 暂存区实际校验和并与期望值比对,
+  // 不匹配则拒绝刷写并通知 [0x08](设备保持存活,不会把残缺镜像刷入卡死)。
+  // 期望值 = sum(固件字节 + 0xFF 补齐到 0x20000) mod 65536,与设备端一致。
+  var expect=0;
+  for(var p=0;p<0x20000;p++){ expect += (p<b.length)?b[p]:0xff; }
+  expect &= 0xffff;
+  var expectHex=('000'+expect.toString(16)).slice(-4);
+  ta.value='校验: 期望 0x'+expectHex+' ...';
+  otaFailFlag=0;otaDevCRC=-1;otaFlashStarted=0;
+  var cmd7err=false;
+  try{await doFinalFlash(expectHex)}catch(e){cmd7err=true;log('OTA 最终刷写命令发送异常（若此前设备已确认刷写，则这是设备重启导致的正常现象）: '+e)}
+  // 三种明确结果:0x08=拒绝;0x09 或 cmd7 发送失败(设备已重启)= 成功;都无=命令未送达。
+  await waitMs(2500);
   setBusy(false);
-  ta.value='✅ 固件刷写完成！CRC='+crc+'，设备将自动重启';
+  if(otaFailFlag){
+    if(otaDevCRC>=0)
+      ta.value='❌ 校验失败：设备端实际校验和 0x'+('000'+otaDevCRC.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，上传数据不完整，未刷写';
+    else
+      ta.value='❌ 校验失败：设备拒绝刷写（上传不完整），未刷写';
+  }else if(otaFlashStarted || cmd7err){
+    ta.value='✅ 设备已确认刷写并重启（若未收到 0x09，则 cmd7 发送失败 = 设备已重启）。约 5 秒后可重新连接，确认版本 FW 1.0X';
+  }else{
+    ta.value='⚠ 未收到设备确认：刷写命令可能未送达，请重试';
+  }
 }
 
 function calculateCRC(data){
@@ -1266,8 +1386,8 @@ function calculateCRC(data){
   return decimalToHex(outCRC&0xffff,4);
 }
 
-async function doFinalFlash(crc){
-  await sendCmd(hexToBytes('07C001CEED'+crc));
+async function doFinalFlash(crcHex){
+  await sendCmd(hexToBytes('07C001CEED'+crcHex));
 }
 
 function decimalToHex(d,padding){var hex=Number(d).toString(16);padding=typeof(padding)==='undefined'||padding===null?padding=2:padding;while(hex.length<padding){hex='0'+hex;}return hex;}
@@ -1285,8 +1405,6 @@ function be24(b,o){return(b[o]<<16)|(b[o+1]<<8)|b[o+2]}
 // blast of Write-Without-Response packets, which silently dropped chunks and
 // left the device image all-white / book data corrupted).
 function waitMs(ms){return new Promise(function(r){setTimeout(r,ms)})}
-
-async function eepromSendE8(){addLog('E8: EPD Part Init + BaseMap + Update');await rxTx(hexToBytes('E8'))}
 </script>
 </body>
 </html>

@@ -4,8 +4,7 @@
 /* EPD refresh planner:
  *   fp=1  full GC (0xF7)
  *   fp=0  partial (0xFF)
- * epd_partial_enabled OFF: scene enter -> full; else partial; GC every N partials/scene
- * epd_partial_enabled ON:  always partial; GC every N refreshes (global counter) */
+ * Scene enter -> full; else partial; GC every N partials per scene. */
 typedef enum {
 	EPD_RF_SCENE_CLOCK = 0,
 	EPD_RF_SCENE_READ,

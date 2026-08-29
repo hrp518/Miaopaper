@@ -196,17 +196,8 @@ _attribute_ram_code_ void EPD_BW_213_SetBaseMap(unsigned char *image, int size)
 	EPD_BW_213_Full_Update();
 }
 
-static const unsigned char epd_test_img[4000] = {
-#include "epd_test_image.inc"
-};
-
-void epd_show_test_image(void)
-{
-	ble_log("Test image: 250x128 start");
-	sleep_ms(15);
-	EPD_BW_213_Display((unsigned char *)epd_test_img, 4000, 1);
-	ble_log("Test image: done");
-}
+/* epd_test_image.inc / epd_show_test_image 已移除(BLE 调试命令 0xEE):
+ * 4KB rodata,固件需保持在 128KB OTA 暂存区上限内。 */
 
 extern uint8_t epd_buffer[epd_buffer_size];
 extern uint8_t epd_temp[epd_buffer_size];

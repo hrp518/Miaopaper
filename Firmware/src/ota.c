@@ -90,10 +90,44 @@ _attribute_ram_code_ int custom_otaWrite(void *p)
 		out_buffer[2] = crc_out;
 		bls_att_pushNotifyData(OTA_CMD_OUT_DP_H, out_buffer, 3);
 		break;
-	case 7:																									  // when upload is done flash the firmware with this cmd, better do some CRC or checking before as it could brick the device
-		if ((address == 0xC001CEED) && (out_buffer[5] == (crc_out >> 8)) && (out_buffer[6] == (crc_out & 0xff))) // Only flash if "magic word" is send
+	case 7: // 校验通过才刷写固件并重启;校验失败拒绝刷写,设备保持存活
+	{
+		uint8_t hdr[16];
+		uint32_t i;
+		uint16_t expect;
+		/* 计算 OTA 暂存区实际校验和:sum(bin + 0xFF 补齐到 0x20000) mod 65536,
+		 * 与网页端期望值比对 —— 上传不完整/页面旧版(512B 银行丢块)都会被拦下,
+		 * 不再把残缺镜像拷进 0x0 导致重启卡死。 */
+		crc_out = 0;
+		for (i = 0; i < OTA_MAX_SIZE; i += 0x100) {
+			flash_read_page(OTA_BANK_START + i, 0x100, ramd_to_flash_temp_buffer);
+			for (int c = 0; c < 0x100; c++)
+				crc_out += ramd_to_flash_temp_buffer[c];
+		}
+		expect = ((uint16_t)payload[5] << 8) | payload[6];
+		/* 额外校验 Telink 镜像标记 "KNLT"(bin 偏移 8..11) */
+		flash_read_page(OTA_BANK_START, 16, hdr);
+		if (address == 0xC001CEED && data_len >= 7 && crc_out == expect &&
+		    hdr[8] == 'K' && hdr[9] == 'N' && hdr[10] == 'L' && hdr[11] == 'T') {
+			/* 校验通过:先通知 [0x09] 表示"刷写开始",留出时间让通知发出,
+			 * 再擦除+拷贝+重启 —— 网页据此明确区分 成功/拒绝/未送达。 */
+			ble_log("OTA7: OK flashing");
+			out_buffer[0] = 0x09;
+			bls_att_pushNotifyData(OTA_CMD_OUT_DP_H, out_buffer, 1);
+			sleep_ms(200);
 			write_ota_firmware_to_flash();
+		} else {
+			char m[56];
+			sprintf(m, "OTA7: REFUSE crc=%u exp=%u", (unsigned)crc_out, (unsigned)expect);
+			ble_log(m);
+			/* 校验失败:拒绝刷写,通知 [0x08][hi][lo] 设备端校验和 */
+			out_buffer[0] = 0x08;
+			out_buffer[1] = (uint8_t)(crc_out >> 8);
+			out_buffer[2] = (uint8_t)crc_out;
+			bls_att_pushNotifyData(OTA_CMD_OUT_DP_H, out_buffer, 3);
+		}
 		break;
+	}
 	}
 
 	return 0;

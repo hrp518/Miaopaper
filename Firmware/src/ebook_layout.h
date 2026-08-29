@@ -57,6 +57,34 @@ static int find_line_break_gb2312(const uint8_t *buf, int len, int max_w)
 	return len;
 }
 
+// GBK 换行:双字节 = 首字节 0x81-0xFE + 尾字节 0x40-0xFE(不含 0x7F),
+// 与 render_page_gbk 的判定完全一致;其余字节按全角 ASCII 计宽。
+static int find_line_break_gbk(const uint8_t *buf, int len, int max_w)
+{
+	int x = 0, i = 0;
+	while (i < len) {
+		if (buf[i] == '\n') return i + 1;
+		if (buf[i] == '\r') { i++; continue; }
+
+		int cw, cb;
+		uint8_t h = buf[i];
+		if (h >= 0x81 && i + 1 < len) {
+			uint8_t t = buf[i+1];
+			if (t >= 0x40 && t <= 0xFE && t != 0x7F) {
+				cw = EB_HZ_CHAR_W; cb = 2;
+			} else {
+				cw = EB_HZ_CHAR_W; cb = 1;   // stray byte -> full-width ASCII
+			}
+		} else {
+			cw = EB_HZ_CHAR_W; cb = 1;
+		}
+		if (x + cw > max_w) return i;
+		x += cw;
+		i += cb;
+	}
+	return len;
+}
+
 // ===================== Page layout (measure only) =====================
 
 // A RAM window over part of the book.  win[0] is the book byte at offset
@@ -85,9 +113,13 @@ static uint32_t eb_page_end(const eb_layout_t *l, uint32_t pos)
 		if (pos + to_read > l->book_len) to_read = l->book_len - pos;
 		if (pos + to_read > l->win_end) to_read = l->win_end - pos;
 		if (to_read <= 0) break;
-		int brk = (l->encoding == EB_ENC_GB2312)
-			? find_line_break_gb2312(l->win + (pos - l->win_base), to_read, EB_MAX_LINE_W)
-			: find_line_break_ascii(l->win + (pos - l->win_base), to_read, EB_MAX_LINE_W);
+		int brk;
+		if (l->encoding == EB_ENC_GB2312)
+			brk = find_line_break_gb2312(l->win + (pos - l->win_base), to_read, EB_MAX_LINE_W);
+		else if (l->encoding == EB_ENC_GBK)
+			brk = find_line_break_gbk(l->win + (pos - l->win_base), to_read, EB_MAX_LINE_W);
+		else
+			brk = find_line_break_ascii(l->win + (pos - l->win_base), to_read, EB_MAX_LINE_W);
 		pos += brk;
 		line++;
 		if (brk >= to_read && to_read < EB_READ_BUF_SIZE) break;

@@ -155,9 +155,7 @@ void cmd_parser(void * p){
 	else if(inData == 0xEC){// 5040-permutation brute-force test of 7 pins across 6 EPD roles
 		epd_5040_perm_test();
 	}
-	else if(inData == 0xEE){// Show test image (full refresh)
-		epd_show_test_image();
-	}
+	/* 0xEE 测试图已移除(固件体积需保持在 128KB OTA 上限内)。 */
 	else if(inData == 0xEF){// Show resolution test pattern
 		epd_resolution_test();
 	}

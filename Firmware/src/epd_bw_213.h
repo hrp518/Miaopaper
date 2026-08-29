@@ -7,7 +7,6 @@ uint8_t EPD_BW_213_read_temp(void);
 uint8_t EPD_BW_213_Display(unsigned char *image, int size, uint8_t full_or_partial);
 void EPD_BW_213_WakeOnly(void);
 void EPD_BW_213_set_sleep(void);
-void epd_show_test_image(void);
 void EPD_BW_213_HW_Init(void);
 void EPD_BW_213_Part_Update(void);
 void EPD_BW_213_Full_Update(void);

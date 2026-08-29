@@ -23,7 +23,8 @@ extern const uint8_t ucMirror[];
 #include "font_60.h"
 #include "font16.h"
 #include "font16zh.h"
-#include "font30.h"
+/* font30.h (Special_Elite_Regular_30) 无引用,已移除 —— 省 ~4KB,固件需
+ * 保持在 128KB OTA 暂存区上限内。 */
 
 RAM uint8_t epd_model = 0; // 0 = Undetected, 1 = BW213, 2 = BWR213, 3 = BWR154, 4 = BW213ICE, 5 BWR296
 const char *epd_model_string[] = {"NC", "BW213", "BWR213", "BWR154", "213ICE", "BWR296"};
@@ -51,8 +52,12 @@ const char *BLE_conn_string[] = {"BLE 0", "BLE 1"};
 RAM uint8_t epd_temperature_is_read = 0;
 RAM uint8_t epd_temperature = 0;
 
-RAM uint8_t epd_buffer[epd_buffer_size];
-RAM uint8_t epd_temp[epd_buffer_size]; // for OneBitDisplay to draw into
+/* 显存缓冲放在普通 RAM(不进保留区):墨水屏是双稳态的,睡眠后画面仍保留
+ * 在面板上;每次唤醒后所有界面(时钟/阅读/锁屏)都会重新渲染再刷新,缓冲
+ * 内容不需要跨深度保留睡眠存活。这样给保留区腾出 ~9KB,避免 .retention_data
+ * 与 .text 重叠(链接失败)。 */
+uint8_t epd_buffer[epd_buffer_size];
+uint8_t epd_temp[epd_buffer_size]; // for OneBitDisplay to draw into
 OBDISP obd;                        // virtual display structure
 TIFFIMAGE tiff;
 

@@ -32,9 +32,16 @@ _attribute_ram_code_ void init_time(void)
 
 _attribute_ram_code_ void handler_time(void)
 {
-    if (clock_time() - last_clock_increase >= one_second_trimmed)
-    {
-        last_clock_increase += one_second_trimmed;
+    uint32_t elapsed = clock_time() - last_clock_increase;
+    if (elapsed < one_second_trimmed)
+        return;
+
+    /* 按实际流逝时间补算所有整秒。注意不能用单次 if:锁屏省电后唤醒间隔
+     * 可能大于 1 秒(轮询唤醒/广播间隔),每轮只加 1 秒会导致时钟变慢。 */
+    uint32_t n = elapsed / one_second_trimmed;
+    last_clock_increase += n * one_second_trimmed;
+
+    while (n--) {
         current_unix_time++;
 
         current_date.tm_min = (current_unix_time / 60) % 60;

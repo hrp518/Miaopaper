@@ -20,11 +20,23 @@
 #include "buttons.h"
 #include "charge_state.h"
 #include "battery_scan.h"
+#include "drivers/8258/watchdog.h"
+
+// 硬件看门狗超时(ms):须大于最长阻塞操作 —— EPD 全刷 WaitBusy 3000ms +
+// 开销 ≈3.2s,单次上传块 <0.5s。设 10s 留足裕量,卡死时最多 10s 自动复位。
+// 深度保留睡眠时 16M 计时器停止,timer2 计数冻结,不会睡眠中误复位;
+// 唤醒后 main_loop 立即喂狗。
+#define WD_TIMEOUT_MS 10000
 
 RAM uint8_t battery_level;
 RAM uint16_t battery_mv;
 RAM int16_t temperature;
 RAM uint32_t last_activity_tick;  // reset on user action; used for sleep delay
+
+// 休眠决策诊断:每 10 秒在 BLE 日志里上报"为何未休眠",便于定位
+// "阅读界面不进休眠"问题(mode/conn/upload/idle/超时/EPD/按键)。
+#define SLP_DIAG_MS 10000
+RAM static uint32_t slp_diag_tick = 0;
 
 // Settings
 extern settings_struct settings;
@@ -60,6 +72,11 @@ _attribute_ram_code_ void user_init_normal(void)
     // the normal main_loop path which will do a partial refresh on the
     // first clock tick.  If the stale image still shows, the user can press
     // any button to force a refresh.
+
+    // 硬件看门狗:10s 超时,固件卡死(渲染/上传/任意路径)自动复位回时钟。
+    // 深度保留睡眠期间 16M 计时器冻结,不会误复位;唤醒后 main_loop 喂狗。
+    wd_set_interval_ms(WD_TIMEOUT_MS, CLOCK_16M_SYS_TIMER_CLK_1MS);
+    wd_start();
 }
 
 _attribute_ram_code_ void user_init_deepRetn(void)
@@ -71,6 +88,7 @@ _attribute_ram_code_ void user_init_deepRetn(void)
 
 _attribute_ram_code_ void main_loop(void)
 {
+    wd_clear();  // 喂看门狗(一次寄存器写);深度保留睡眠期间计数冻结,唤醒后立即续喂
     blt_sdk_main_loop();
     ble_link_maintenance_tick();
     handler_time();
@@ -162,13 +180,20 @@ _attribute_ram_code_ void main_loop(void)
         uint16_t timeout_s = g_sleep_timeout_s[settings.sleep_timeout_idx];
 
         if (eb_mode == EB_MODE_LOCK) {
+            /* 锁屏轮询唤醒:锁屏时广播已停止(ebook_handle_lock 里关掉),
+             * 唤醒不能再靠广播事件 —— 这里显式挂一个 32k 应用唤醒定时器,
+             * 每 LOCK_POLL_MS 醒来一次轮询按钮/保持时钟,与 BLE 状态彻底
+             * 解耦(即使 BLE 被用户关掉,锁屏也绝不会睡死)。每一轮都重新
+             * 武装,下一次 blt_sdk_main_loop 的睡眠就会以它为唤醒源。 */
+            bls_pm_setAppWakeupLowPower(
+                clock_time() + (uint32_t)LOCK_POLL_MS * CLOCK_16M_SYS_TIMER_CLK_1MS, 1);
+
             /* Locked: sleep only when the EPD is idle and no button is held.
              * While a button is held we keep SUSPEND_DISABLE so the 10 ms
              * button scan can process the press (long-press F -> unlock).
-             * The sleep itself is handed to the BLE stack (ADV-driven): it
-             * deep-retention sleeps between advertising events and wakes to
-             * transmit, so the device keeps advertising and stays
-             * discoverable while locked.  No GPIO pad wake-ups are armed --
+             * The sleep itself is handed to the BLE stack (timer-driven
+             * deep-retention): the MCU sleeps between poll wakes and keeps
+             * advertising OFF while locked.  No GPIO pad wake-ups are armed --
              * the analog pulls die in deep retention and the floating pins
              * would fire spurious wakes (the old self-wake loop). */
             uint8_t held = !gpio_read(BTN_FRONT_PIN) ||
@@ -176,35 +201,37 @@ _attribute_ram_code_ void main_loop(void)
                            !gpio_read(BTN_RIGHT_PIN);
             allow_sleep = !held && !epd_update_state;
         }
-        else if (ble_get_connected()) {
-            /* A BLE central is connected.  While connected we NEVER auto-lock:
-             * the lock-screen handler triggers a full EPD refresh, which seizes
-             * the SPI bus shared with the external flash and would corrupt any
-             * in-flight upload (book/font/lock-image) -- the root cause of the
-             * "EPD busy (0xFE)" upload failures.  The user can still lock
-             * manually with a long-press of FRONT (ebook_handle_lock is called
-             * directly from the button handler, not from here).  Stay awake so
-             * the link stays responsive. */
+        else {
+            /* 非锁屏:不需要轮询唤醒定时器,关掉它。 */
+            bls_pm_setAppWakeupLowPower(0, 0);
+
+            if (ble_get_connected() && (ebook_ble_is_uploading() || ble_get_ota_started())) {
+            /* BLE 连接中且正在上传(书籍/字库)或 OTA 升级:绝不在此时自动锁屏
+             * —— 锁屏处理会触发一次全刷,抢占与外部 Flash 共享的 SPI 总线,
+             * 破坏进行中的上传;OTA 走 ota_started 标志(非 ebook 上传标志),
+             * 也要一并拦截,否则 MTU-23 下几分钟的上传途中设备会中途锁屏。
+             * 空闲连接(未上传)则照常超时自动锁屏,保证阅读界面也能休眠。 */
             allow_sleep = 0;
         }
         else if (idle_ticks < (uint32_t)timeout_s * 1000 * CLOCK_16M_SYS_TIMER_CLK_1MS) {
             allow_sleep = 0;                  // active within timeout -> awake
         }
         else {
-            /* Idle timeout expired (no BLE connection).  Enter the LOCK
-             * (screen-saver) screen so the user wakes into a sane state instead
-             * of being stuck inside e.g. the Settings menu.  ebook_handle_lock()
-             * is a no-op when already locked, and converts the current mode
-             * (clock / reading / settings / about / select) to LOCK while
-             * remembering the previous one for resume after wake.  The actual
-             * SUSPEND happens on the NEXT main-loop pass when eb_mode == LOCK
-             * (case above), once the lock-render refresh has settled. */
+            /* Idle timeout expired.  Enter the LOCK (screen-saver) screen so
+             * the user wakes into a sane state instead of being stuck inside
+             * e.g. the Settings menu.  ebook_handle_lock() is a no-op when
+             * already locked, and converts the current mode (clock / reading /
+             * settings / about / select) to LOCK while remembering the
+             * previous one for resume after wake.  The actual SUSPEND happens
+             * on the NEXT main-loop pass when eb_mode == LOCK (case above),
+             * once the lock-render refresh has settled. */
             ebook_handle_lock();
             /* Never sleep on THIS pass: the lock render starts a full EPD
              * refresh, and suspending mid-refresh leaves the panel stuck
              * (BUSY low -> epd_update_state=1 forever -> every later redraw
              * skipped).  Wait for the refresh to finish first. */
             allow_sleep = !epd_update_state;
+            }
         }
 
         if (allow_sleep)
@@ -222,6 +249,23 @@ _attribute_ram_code_ void main_loop(void)
         {
             /* Fully awake: keep the BLE radio + CPU running, ignore sleep. */
             bls_pm_setSuspendMask(SUSPEND_DISABLE);
+        }
+
+        /* 诊断:每 10 秒上报一次休眠决策因子(未休眠时)。 */
+        if (!allow_sleep &&
+            (int32_t)(clock_time() - slp_diag_tick) >=
+                (int32_t)(SLP_DIAG_MS * CLOCK_16M_SYS_TIMER_CLK_1MS)) {
+            slp_diag_tick = clock_time();
+            uint8_t held = !gpio_read(BTN_FRONT_PIN) ||
+                           !gpio_read(BTN_LEFT_PIN)  ||
+                           !gpio_read(BTN_RIGHT_PIN);
+            char sb[72];
+            sprintf(sb, "SLP: mode=%d conn=%d up=%d idle=%us to=%us epd=%d held=%d",
+                    (int)eb_mode, ble_get_connected() ? 1 : 0,
+                    ebook_ble_is_uploading() ? 1 : 0,
+                    (unsigned)(idle_ticks / (CLOCK_16M_SYS_TIMER_CLK_1MS * 1000)),
+                    (unsigned)timeout_s, (int)epd_update_state, held ? 1 : 0);
+            ble_log(sb);
         }
     }
 }

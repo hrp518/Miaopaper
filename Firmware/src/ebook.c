@@ -633,17 +633,9 @@ void ebook_next_book(void)
 
 // ===================== HZK16 Chinese rendering (from external flash) =====================
 
-static void draw_hz_char(uint8_t high, uint8_t low, int x, int y)
+// Plot a 16x16 HZK16 bitmap (32 bytes, row-major, MSB first) at (x,y).
+static void draw_hz_bitmap(const uint8_t *bitmap, int x, int y)
 {
-	if (!ebook_catalog_font_installed()) return;
-	uint8_t section = high - 0xA0;
-	uint8_t position = low - 0xA0;
-	if (section < 1 || section > 87 || position < 1 || position > 94) return;
-
-	uint32_t offset = ((uint32_t)(section - 1) * 94 + (position - 1)) * EB_HZ_CHAR_BYTES;
-	uint8_t bitmap[EB_HZ_CHAR_BYTES];
-	ext_flash_read(EB_FONT_ADDR + offset, EB_HZ_CHAR_BYTES, bitmap);
-
 	for (int row = 0; row < EB_HZ_CHAR_H; row++) {
 		uint16_t bits = ((uint16_t)bitmap[row * 2] << 8) | bitmap[row * 2 + 1];
 		int sy = y + row;
@@ -656,6 +648,117 @@ static void draw_hz_char(uint8_t high, uint8_t low, int x, int y)
 				base[col] |= mask;
 		}
 	}
+}
+
+static void draw_hz_char(uint8_t high, uint8_t low, int x, int y)
+{
+	if (!ebook_catalog_font_installed()) return;
+	uint8_t section = high - 0xA0;
+	uint8_t position = low - 0xA0;
+	if (section < 1 || section > 87 || position < 1 || position > 94) return;
+
+	uint32_t offset = ((uint32_t)(section - 1) * 94 + (position - 1)) * EB_HZ_CHAR_BYTES;
+	uint8_t bitmap[EB_HZ_CHAR_BYTES];
+	ext_flash_read(EB_FONT_ADDR + offset, EB_HZ_CHAR_BYTES, bitmap);
+	draw_hz_bitmap(bitmap, x, y);
+}
+
+// ===================== GBK 扩展大字库(文泉驿点阵宋体) =====================
+// 旧字库只覆盖 GB2312(无繁体)。GBK 编码是 GB2312 的超集:GB2312 区码位
+// (0xA1A1-0xA9FE 符号 + 0xB0A1-0xF7FE 简体)沿用旧字库快速路径(偏移完全
+// 兼容);其余码位(繁体/生僻字/扩展符号)查 WQY_GBK16.bin 稀疏字典。
+// 字典格式:32 字节头 + N*4 字节 (gbk_code,glyph_index) 表(按码排序) +
+// N*32 字节字形块。查找用二分 + 8 项小缓存(中文文本重复率高)。
+
+static uint32_t gbk_dict_count;
+static uint32_t gbk_table_off;
+static uint32_t gbk_glyph_off;
+
+#define GBK_CACHE_N 8
+static uint32_t gbk_cache_magic;
+#define GBK_CACHE_MAGIC 0x47424B31u   // "GBK1"
+static uint16_t gbk_cache_code[GBK_CACHE_N];
+static uint16_t gbk_cache_idx[GBK_CACHE_N];
+static uint8_t  gbk_cache_pos;
+
+// 检查扩展字库是否安装并缓存字典参数(每页渲染调用一次,12 字节读取)。
+static uint8_t ebook_gbk_font_installed(void)
+{
+	uint8_t m[4];
+	if (!ext_flash_is_safe()) return 0;
+	ext_flash_init();
+	ext_flash_read(EB_GBK_FONT_ADDR, 4, m);
+	if (m[0] != EB_GBK_FONT_MAGIC0 || m[1] != EB_GBK_FONT_MAGIC1 ||
+	    m[2] != EB_GBK_FONT_MAGIC2 || m[3] != EB_GBK_FONT_MAGIC3) {
+		gbk_dict_count = 0;
+		return 0;
+	}
+	uint8_t hdr[12];
+	ext_flash_read(EB_GBK_FONT_ADDR + 8, 12, hdr);
+	gbk_dict_count = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
+	                 ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+	gbk_table_off = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) |
+	                ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
+	gbk_glyph_off = (uint32_t)hdr[8] | ((uint32_t)hdr[9] << 8) |
+	                ((uint32_t)hdr[10] << 16) | ((uint32_t)hdr[11] << 24);
+	return 1;
+}
+
+// 二分查找 GBK 码 -> 字形索引;0xFFFF = 未找到。带 8 项直接映射缓存。
+static uint16_t gbk_dict_lookup(uint16_t code)
+{
+	// 缓存(普通 RAM 跨深度保留睡眠会变脏,用 magic 检测)
+	if (gbk_cache_magic != GBK_CACHE_MAGIC) {
+		for (int i = 0; i < GBK_CACHE_N; i++) {
+			gbk_cache_code[i] = 0;
+			gbk_cache_idx[i] = 0;
+		}
+		gbk_cache_pos = 0;
+		gbk_cache_magic = GBK_CACHE_MAGIC;
+	}
+	for (int i = 0; i < GBK_CACHE_N; i++) {
+		if (gbk_cache_code[i] == code)
+			return gbk_cache_idx[i];
+	}
+
+	uint32_t lo = 0, hi = gbk_dict_count;
+	uint16_t result = 0xFFFF;
+	while (lo < hi) {
+		uint32_t mid = (lo + hi) >> 1;
+		uint8_t e[4];
+		ext_flash_read(EB_GBK_FONT_ADDR + gbk_table_off + mid * 4, 4, e);
+		uint16_t c = (uint16_t)e[0] | ((uint16_t)e[1] << 8);
+		if (c == code) {
+			result = (uint16_t)e[2] | ((uint16_t)e[3] << 8);
+			break;
+		} else if (c < code) {
+			lo = mid + 1;
+		} else {
+			hi = mid;
+		}
+	}
+
+	gbk_cache_code[gbk_cache_pos] = code;
+	gbk_cache_idx[gbk_cache_pos] = result;
+	gbk_cache_pos = (gbk_cache_pos + 1) % GBK_CACHE_N;
+	return result;
+}
+
+// 渲染一个 GBK 双字节字符:GB2312 区走旧字库,其余查扩展字典。
+static void draw_gbk_char(uint8_t high, uint8_t low, int x, int y)
+{
+	if (low >= 0xA1 &&
+	    ((high >= 0xA1 && high <= 0xA9) || (high >= 0xB0 && high <= 0xF7))) {
+		draw_hz_char(high, low, x, y);   // GB2312 快速路径(偏移兼容)
+		return;
+	}
+	if (!ebook_gbk_font_installed()) return;
+	uint16_t idx = gbk_dict_lookup(((uint16_t)high << 8) | low);
+	if (idx == 0xFFFF) return;
+	uint8_t bitmap[EB_HZ_CHAR_BYTES];
+	ext_flash_read(EB_GBK_FONT_ADDR + gbk_glyph_off + (uint32_t)idx * EB_HZ_CHAR_BYTES,
+	               EB_HZ_CHAR_BYTES, bitmap);
+	draw_hz_bitmap(bitmap, x, y);
 }
 
 // ===================== Line breaking =====================
@@ -681,6 +784,40 @@ static int dialog16_text_width(const char *s)
 	return w;
 }
 
+// Rendered width (px) of a catalog title, mirroring draw_title_string():
+// ASCII glyphs use the Dialog_plain_16 advances, GB2312/GBK titles advance a
+// full 16 px cell per character (including the A3xx full-width ASCII letters).
+static int title_draw_width(const char *title, uint8_t enc)
+{
+	const uint8_t *p = (const uint8_t *)title;
+
+	if (enc != EB_ENC_GB2312 && enc != EB_ENC_GBK) {
+		for (int i = 0; p[i]; i++) {
+			if (p[i] >= 0xA1) { enc = EB_ENC_GB2312; break; }
+		}
+	}
+
+	if (enc == EB_ENC_GB2312) {
+		int w = 0;
+		for (int i = 0; p[i]; i++) {
+			if (p[i] >= 0xA1 && p[i + 1] >= 0xA1) i++;  // 2-byte char
+			w += EB_HZ_CHAR_W;
+		}
+		return w;
+	}
+	if (enc == EB_ENC_GBK) {
+		int w = 0;
+		for (int i = 0; p[i]; i++) {
+			uint8_t h = p[i];
+			uint8_t t = p[i + 1];
+			if (h >= 0x81 && t >= 0x40 && t <= 0xFE && t != 0x7F) i++;  // 2-byte GBK
+			w += EB_HZ_CHAR_W;
+		}
+		return w;
+	}
+	return dialog16_text_width(title);
+}
+
 static void ebook_commit_display(epd_rf_scene_t scene, uint8_t allow_partial)
 {
 	uint8_t mode = epd_refresh_pick(scene, allow_partial);
@@ -697,7 +834,7 @@ static void draw_title_string(const char *title, uint8_t enc, int x, int baselin
 	const uint8_t *p = (const uint8_t *)title;
 
 	/* Older uploads may have GB2312 bytes but enc=ASCII in catalog. */
-	if (enc != EB_ENC_GB2312) {
+	if (enc != EB_ENC_GB2312 && enc != EB_ENC_GBK) {
 		for (int i = 0; p[i]; i++) {
 			if (p[i] >= 0xA1) { enc = EB_ENC_GB2312; break; }
 		}
@@ -715,6 +852,26 @@ static void draw_title_string(const char *title, uint8_t enc, int x, int baselin
 			} else {
 				/* Full-width advance, same reason as render_page_gb2312: the
 				 * HZK16 A3xx letters occupy the whole 16 px cell. */
+				if (cx + EB_HZ_CHAR_W > x + max_w) break;
+				uint8_t c = p[i++];
+				if (c == '\r' || c == '\n') continue;
+				if (c < 0x20 || c > 0x7E) c = ' ';
+				draw_hz_char(0xA3, c + 0x80, cx, y_hz);
+				cx += EB_HZ_CHAR_W;
+			}
+		}
+	} else if (enc == EB_ENC_GBK) {
+		int cx = x;
+		int y_hz = EB_HZ_Y_FROM_BASELINE(baseline);
+		for (int i = 0; p[i] && cx - x < max_w; ) {
+			uint8_t h = p[i];
+			uint8_t t = p[i + 1];
+			if (h >= 0x81 && t >= 0x40 && t <= 0xFE && t != 0x7F) {
+				if (cx + EB_HZ_CHAR_W > x + max_w) break;
+				draw_gbk_char(h, t, cx, y_hz);
+				cx += EB_HZ_CHAR_W;
+				i += 2;
+			} else {
 				if (cx + EB_HZ_CHAR_W > x + max_w) break;
 				uint8_t c = p[i++];
 				if (c == '\r' || c == '\n') continue;
@@ -751,6 +908,42 @@ static void draw_title_string(const char *title, uint8_t enc, int x, int baselin
 
 // ===================== Page rendering =====================
 
+// 状态栏公共布局:标题(为中间标签预留空间而提前裁剪)+ 中间标签 + 电量。
+// 阅读界面中间标签 = 已读/总页数比例;阅读锁屏界面 = "Locked"。
+static void draw_status_bar_lbl(const char *lbl)
+{
+	char title[21];
+	uint8_t enc;
+	ebook_catalog_read(ebook_state.book_idx, NULL, NULL, &enc, title);
+
+	int lw = dialog16_text_width(lbl);
+	int gap = 6;
+
+	/* Reserve room for the marker + gap + battery before clipping the title. */
+	int title_max = EB_BATT_X0 - EB_TEXT_MARGIN - gap - lw;
+	if (title_max < 20) title_max = 20;
+	draw_title_string(title, enc, EB_TEXT_MARGIN, EB_BAR_TEXT_Y, title_max);
+
+	int tw = title_draw_width(title, enc);
+	if (tw > title_max) tw = title_max;   // marker sits right after the clipped title
+	obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16,
+	                     EB_TEXT_MARGIN + tw + gap, EB_BAR_TEXT_Y, (char *)lbl, 1);
+
+	char bbuf[8];
+	ui_format_battery(bbuf, sizeof(bbuf));
+	{
+		int bw = dialog16_text_width(bbuf);
+		int bx = EB_DISP_W - EB_TEXT_MARGIN - bw;
+		if (bx < EB_BATT_X0)
+			bx = EB_BATT_X0;
+		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16,
+		                     bx, EB_BAR_TEXT_Y, bbuf, 1);
+	}
+
+	obdRectangle(&obd, 0, EB_DIVIDER_Y1, EB_DISP_W - 1, EB_DIVIDER_Y2, 1, 1);
+}
+
+// 阅读界面状态栏:书名(左)+ 电量(右)。
 static void draw_status_bar(void)
 {
 	char title[21];
@@ -850,6 +1043,55 @@ static uint32_t render_page_gb2312(uint32_t pos)
 	return pos;
 }
 
+// GBK 页面渲染:与 render_page_gb2312 相同布局,但双字节判断按 GBK 规则
+// (首字节 0x81-0xFE,尾字节 0x40-0xFE 且非 0x7F)。GB2312 区码位仍走旧
+// 字库,其余(繁体等)走 WQY_GBK16.bin 扩展字典。
+static uint32_t render_page_gbk(uint32_t pos)
+{
+	int y = EB_CONTENT_TOP;
+	int line = 0;
+
+	while (line < EB_LINES_PER_PAGE && pos < ebook_state.book_len) {
+		int to_read = EB_READ_BUF_SIZE;
+		if (pos + to_read > ebook_state.book_len)
+			to_read = ebook_state.book_len - pos;
+		ext_flash_read(ebook_state.book_start + pos, to_read, ebook_read_buf);
+
+		int brk = find_line_break_gbk(ebook_read_buf, to_read, EB_MAX_LINE_W);
+
+		int x = EB_TEXT_MARGIN;
+		int i = 0;
+		while (i < brk && x < EB_DISP_W) {
+			uint8_t h = ebook_read_buf[i];
+			if (h >= 0x81 && i + 1 < brk) {
+				uint8_t t = ebook_read_buf[i+1];
+				if (t >= 0x40 && t <= 0xFE && t != 0x7F) {
+					if (x + EB_HZ_CHAR_W <= EB_MAX_LINE_W)
+						draw_gbk_char(h, t, x, y);
+					x += EB_HZ_CHAR_W;
+					i += 2;
+					continue;
+				}
+			}
+			/* Full-width ASCII / stray byte, same advance rule as gb2312. */
+			uint8_t c = h;
+			if (c == '\r' || c == '\n') { i++; continue; }
+			if (c < 0x20 || c > 0x7E) c = ' ';
+			if (x + EB_HZ_CHAR_W <= EB_MAX_LINE_W)
+				draw_hz_char(0xA3, c + 0x80, x, y);
+			x += EB_HZ_CHAR_W;
+			i++;
+		}
+
+		pos += brk;
+		y += EB_LINE_H_HZ;
+		line++;
+
+		if (brk >= to_read && to_read < EB_READ_BUF_SIZE) break;
+	}
+	return pos;
+}
+
 void ebook_display_current_page(void)
 {
 	if (!ebook_state.active || !ext_flash_is_safe()) return;
@@ -864,6 +1106,8 @@ void ebook_display_current_page(void)
 
 	if (ebook_state.encoding == EB_ENC_GB2312) {
 		render_page_gb2312(ebook_state.char_pos);
+	} else if (ebook_state.encoding == EB_ENC_GBK) {
+		render_page_gbk(ebook_state.char_pos);
 	} else {
 		render_page_ascii(ebook_state.char_pos);
 	}
@@ -882,6 +1126,8 @@ void ebook_next_page(void)
 	uint32_t next_pos;
 	if (ebook_state.encoding == EB_ENC_GB2312) {
 		next_pos = render_page_gb2312(ebook_state.char_pos);
+	} else if (ebook_state.encoding == EB_ENC_GBK) {
+		next_pos = render_page_gbk(ebook_state.char_pos);
 	} else {
 		next_pos = render_page_ascii(ebook_state.char_pos);
 	}
@@ -939,6 +1185,38 @@ void ebook_prev_page(void)
 
 // ===================== Lock screen =====================
 
+// 阅读锁屏模式: re-render the current reading page and mark the status bar
+// "Locked" (right of the book title, left of the battery) instead of showing
+// the screensaver image.  All body text stays on screen -- the reading page
+// itself becomes the lock screen.
+static void ebook_render_lock_reading(void)
+{
+	if (epd_update_state) { render_pending = 1; return; }
+
+	epd_clear();
+	obdCreateVirtualDisplay(&obd, EB_DISP_W, EB_DISP_H, epd_temp);
+	obdFill(&obd, 0, 0);
+	ext_flash_init();
+
+	/* 阅读锁屏:状态栏隐藏阅读进度比例,显示 "Locked"。 */
+	draw_status_bar_lbl("Locked");
+
+	if (ebook_state.encoding == EB_ENC_GB2312) {
+		render_page_gb2312(ebook_state.char_pos);
+	} else if (ebook_state.encoding == EB_ENC_GBK) {
+		render_page_gbk(ebook_state.char_pos);
+	} else {
+		render_page_ascii(ebook_state.char_pos);
+	}
+
+	FixBuffer(epd_temp, epd_buffer, EB_DISP_W, EB_DISP_H);
+	/* ebook_handle_lock already cleared epd_partial_ready; commit as a full
+	 * refresh so the locked reading frame becomes the new 0x26 base map. */
+	EPD_Display(epd_buffer, NULL, EB_DISP_W * EB_DISP_H / 8, 1);  // lock: full refresh
+	epd_partial_ready = 1;
+	render_pending = 0;
+}
+
 void ebook_render_lock(void)
 {
 	uint8_t valid = 0;
@@ -947,6 +1225,14 @@ void ebook_render_lock(void)
 		 * would skip the image check (drawing the text fallback) and stack
 		 * a second refresh on a busy panel; retry from main_loop instead. */
 		render_pending = 1;
+		return;
+	}
+
+	/* 阅读锁屏模式: locking while reading keeps the reading page on the panel
+	 * (with a "Locked" marker) instead of switching to the screensaver. */
+	if (settings.lock_read_enabled && eb_prev_mode == EB_MODE_READ &&
+	    ebook_state.active) {
+		ebook_render_lock_reading();
 		return;
 	}
 
@@ -982,6 +1268,10 @@ void ebook_handle_lock(void)
 	// just the clock, so the user can put the device to sleep while reading.
 	eb_prev_mode = eb_mode;               // remember where we came from
 	eb_mode = EB_MODE_LOCK;
+	/* 省电:锁屏期间停止 BLE 广播。唤醒改由 app.c 的 32k 轮询定时器保证
+	 * (见 LOCK_POLL_MS),不再依赖广播事件,因此锁屏时不会有任何 RF 发射。
+	 * 解锁时(ebook_handle_unlock)按设置恢复广播。 */
+	ble_set_advertising(0);
 	{	// Debug: did the lock actually run, and does the panel state allow it?
 		char lk[48];
 		sprintf(lk, "LK:LOCK prev=%d st=%d", eb_prev_mode, epd_update_state);
@@ -1006,6 +1296,9 @@ void ebook_handle_lock(void)
 void ebook_handle_unlock(void)
 {
 	if (eb_mode != EB_MODE_LOCK) return;
+	/* 恢复广播(锁屏时被关掉)。BLE 关闭设置的用户保持关闭。 */
+	if (settings.ble_enabled)
+		ble_set_advertising(1);
 	// Restore the screen the user was on before locking.  If it was a
 	// menu (SETTINGS/SELECT/ABOUT), always go back to CLOCK on unlock --
 	// users don't expect to land on a settings screen after lock+unlock.
@@ -1187,7 +1480,7 @@ void ebook_select_down(void)
 // Bluetooth, pick the idle-sleep timeout and view the firmware version.
 // Navigation uses partial refresh (0xFF) after the entry full refresh.
 
-#define EB_SET_ITEM_COUNT 6   // BT / Sleep / Partial / GC / About / Exit
+#define EB_SET_ITEM_COUNT 6   // BT / Sleep / LockScr / GC / About / Exit
 RAM static uint8_t eb_set_selected = 0;
 
 static void ebook_render_settings(void)
@@ -1226,8 +1519,8 @@ static void ebook_render_settings(void)
 			break;
 		}
 		case 2:
-			sprintf(item + 1, "GPart: %s",
-			        settings.epd_partial_enabled ? "On" : "Off");
+			sprintf(item + 1, "LockScr: %s",
+			        settings.lock_read_enabled ? "On" : "Off");
 			break;
 		case 3: {
 			uint8_t gi = settings.epd_gc_interval_idx;
@@ -1314,8 +1607,8 @@ void ebook_settings_change(void)
 		save_settings_to_flash();
 		ebook_render_settings();
 		break;
-	case 2: // toggle global partial refresh
-		settings.epd_partial_enabled = !settings.epd_partial_enabled;
+	case 2: // toggle 阅读锁屏模式 (reading screen as lock screen)
+		settings.lock_read_enabled = !settings.lock_read_enabled;
 		save_settings_to_flash();
 		ebook_render_settings();
 		break;
@@ -1368,15 +1661,14 @@ static void ebook_render_about(void)
 		int ty = EB_MENU_BASELINE0;
 		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, tx, ty, "MiaoPaper", 1);
 		ty += EB_LINE_H_ASCII;
-		sprintf(line, "FW v%d.%d.%d", FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH);
+		sprintf(line, "FW %s", FW_VERSION_STR);
 		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, tx, ty, line, 1);
 
-		sprintf(line, "Build:");
-		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, tx, ty + EB_LINE_H_ASCII, line, 1);
-		sprintf(line, "%s", BUILD_DATE);
-		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, tx, ty + 2 * EB_LINE_H_ASCII, line, 1);
-		sprintf(line, "%s", BUILD_TIME);
-		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, tx, ty + 3 * EB_LINE_H_ASCII, line, 1);
+		/* Build 日期+时间合并为一行,最后一行停在 ty=82,与底部提示行
+		 * (EB_FOOTER_TEXT_Y=122)留足间距,不再重叠。 */
+		ty += EB_LINE_H_ASCII;
+		sprintf(line, "Build: %s %s", BUILD_DATE, BUILD_TIME);
+		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, tx, ty, line, 1);
 
 		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16,
 		                     4, EB_FOOTER_TEXT_Y, "R:pg2  F:back", 1);
@@ -1386,7 +1678,7 @@ static void ebook_render_about(void)
 		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 4, ty, line, 1);
 
 		/* Email on its own line (no long label) so it fits 250px width. */
-		ty += EB_LINE_H_ASCII + 6;
+		ty += EB_LINE_H_ASCII;
 		sprintf(line, "%s", AUTHOR_EMAIL);
 		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 4, ty, line, 1);
 
@@ -1394,6 +1686,7 @@ static void ebook_render_about(void)
 		sprintf(line, "Bili: %s", AUTHOR_BILIBILI);
 		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 4, ty, line, 1);
 
+		/* 最后一行停在 ty=101,与底部提示行(122)留足间距,不再重叠。 */
 		ty += EB_LINE_H_ASCII;
 		sprintf(line, "Git: %s", AUTHOR_GITHUB);
 		obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 4, ty, line, 1);
@@ -1462,7 +1755,7 @@ void ebook_check_pending_render(void)
 }
 
 // ===================== Per-book reading progress =====================
-// Append-only ring of 8-byte records in the dedicated 4 KB sector
+// Append-only ring of 8-byte records in the dedicated 4 KB sector at
 // EB_PROG_ADDR.  One append per save amortises the sector erase over
 // ~512 saves, so frequent page-turn saves do not wear out the flash.
 //

@@ -379,6 +379,8 @@ function notifyBytes(data){
 
 function onNotify(data){
   var b=notifyBytes(data);
+  // OTA 大块写能力探测应答(0x05 读回缓冲):一次性 waiter,优先于其他分发
+  if(otaProbeCB!==null){var pr=otaProbeCB,rs=otaProbeResolve;otaProbeCB=null;otaProbeResolve=null;if(rs)rs(b);return}
   if(b.length>0&&b[0]==0x19){statusNotify(b);return}
   if(b.length>0&&b[0]==0x33){lockImgNotify(b);return}
   if(b.length>0&&b[0]==0x34){settingsNotify(b);return}
@@ -488,10 +490,23 @@ function handleBook15Notify(b){
 // the firmware, losing an occasional notify only delays the ack, never corrupts
 // data (the next notify carries the up-to-date cumulative count).
 var fwWritten=0;
+var otaFailFlag=0;   // 设备端 OTA 校验失败通知(0x08)
+var otaDevCRC=-1;    // 设备端算出的实际校验和
+var otaFlashStarted=0;  // 设备端确认刷写开始(0x09)
+var otaProbeCB=null,otaProbeResolve=null;  // OTA 0x05 读回探测的一次性 waiter
+function otaProbeRead(timeout){
+  timeout=timeout||800;
+  return new Promise(function(resolve){
+    otaProbeCB=1;otaProbeResolve=resolve;
+    setTimeout(function(){if(otaProbeCB!==null){otaProbeCB=null;var r=otaProbeResolve;otaProbeResolve=null;if(r)r(null)}},timeout);
+  });
+}
 function ebookNotify(b){
   var cmd=b[0];
   if(cmd==0x10&&b.length>=3){if(ebookCB==0x10){ebookResolve(b);ebookCB=null}}
   else if(cmd==0x12&&b.length>=6){if(ebookCB==0x12){ebookResolve(b);ebookCB=null}}
+  else if(cmd==0x08&&b.length>=3){otaFailFlag=1;otaDevCRC=((b[1]<<8)|b[2])&0xffff;log('OTA 设备端校验和: 0x'+('000'+otaDevCRC.toString(16)).slice(-4));}
+  else if(cmd==0x09){otaFlashStarted=1;log('OTA 设备确认: 刷写开始,即将重启');}
   else if(cmd==0x14&&b.length>=2){
     entryCount=b[1];entries=[];
     if(ebookCB==0x14){if(listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}ebookResolve(b);ebookCB=null}}
@@ -1180,6 +1195,7 @@ async function flashDiagSelfTest(){
 async function fwSend(){
   if(!wrChar){log('未连接');return}
   if(busy){log('设备忙，请等待当前操作完成');return}
+  log('OTA: 原版ATC方案(240B大块写 + 50ms银行延时 + 设备端CRC校验) —— 若看不到此行说明是旧缓存页，请 Ctrl+F5');
   var f=document.getElementById('fwFile').files[0];if(!f)return;
   var b=new Uint8Array(await f.arrayBuffer());
   // Validate: first 4 bytes must be KNL header (4b4e4c54)
@@ -1189,37 +1205,56 @@ async function fwSend(){
   ta.value='固件大小: '+(b.length/1024).toFixed(1)+' KB, 擦除中...';
   setBusy(true);
 
-  // Erase firmware area (0x20000..0x80000, in 4KB blocks)
+  // OTA 大块写能力探测:先发 240B 的 0x03,再经 0x05 读回缓冲偏移 0x20。
+  // 若 240B 被完整接收,读回字节为 0xAA;若浏览器实际只接受 20B(静默截断),
+  // 0x20 之后的字节为 0。随后 0x01 擦除会 memset 缓冲并复位 ram_position,
+  // 探测数据无残留。原版 ATC 网页就是 240B 大块写 —— Chrome 在 MTU 协商后
+  // 实际接受 ~244B(maxWriteValueLength() 只反映协商前的默认值 20,是假值)。
+  var bigOk=false;
+  try{
+    await sendCmd(hexToBytes('03'+'aa'.repeat(240)));
+    var pr=otaProbeRead();
+    await sendCmd(hexToBytes('0500000020'));
+    var rb=await pr;
+    bigOk=!!(rb&&rb.length>0&&rb[0]===0xaa);
+  }catch(e){bigOk=false}
+  log(bigOk?'大块写探测: 240B 完整接收,采用原版 ATC 大块方案(快)':'大块写探测: 浏览器仅支持小块,回退 19B 方案(慢但稳)');
+
+  // Erase firmware area (0x20000..0x40000, in 4KB blocks) —— 与原版 ATC 网页一致
   var eraseAddr=0x20000;
-  while(eraseAddr<0x80000){
+  while(eraseAddr<0x40000){
     var eraseCmd=new Uint8Array([0x01,(eraseAddr>>16)&0xff,(eraseAddr>>8)&0xff,eraseAddr&0xff]);
     try{await sendCmd(eraseCmd)}catch(e){ta.value='擦除失败';setBusy(false);return}
     eraseAddr+=0x1000;
   }
   ta.value='擦除完成，写入中...';
 
-  // Send data using old OTA protocol: 0x03 for data chunks, 0x02 for bank write
-  // Each bank is 512 bytes (0x200 hex chars);
-  // 0x03 + hex data sends data to buffer, 0x02 + hex address writes buffer to flash.
+  // Send data using the ORIGINAL ATC web page scheme (sendPart/sendFile):
+  //   - each 0x03 write carries 240 bytes (480 hex chars) when big writes are
+  //     supported (device negotiated ATT MTU 247 -> browser accepts ~244B
+  //     writes; maxWriteValueLength()=20 only reflects the pre-negotiation
+  //     default and is a lie after the MTU exchange);
+  //   - one 0x02 bank write per 256B bank;
+  //   - 50ms pause after each bank write (gives the flash time, paces the link).
+  //   Whole image = ~530 writes instead of ~7000 tiny 19B writes -> far fewer
+  //   chances for the link to drop a packet.
+  // 银行大小必须 = 0x100 (256B):设备端 ota.c 的 ramd_to_flash_temp_buffer 只有
+  // 256B,case 3 写入超出即 return 0 丢弃。
   ta.value='写入中...';
   startTime=new Date().getTime();
   fwSizeComplete=hexStr.length;
   fwBytesTransmited=0;
 
-  var bankSize=0x200;  // 512 bytes per bank
+  var bankSize=0x100;  // 256 bytes per bank,匹配设备缓冲区
+  var chunkLen=bigOk?240:19;   // bytes per 0x03 write (原版 ATC 用 240)
+  var partLen=chunkLen*2;      // hex chars per write
   var pos=0;
   while(pos<b.length){
     // Collect up to bankSize bytes for this bank
     var chunk=b.slice(pos,Math.min(pos+bankSize,b.length));
     var chunkHex=bytesToHex(chunk);
 
-    // Send data chunks (0x03 + hex data).  Chunk size is derived from the
-    // negotiated MTU: payload = MTU-3, minus 1 byte for the 0x03 opcode, the
-    // rest is ASCII hex so each chunk carries (payload-1)/2 binary bytes.
-    // At MTU 247 that's ~121 bytes/chunk vs the old fixed 240 hex chars that
-    // got fragmented across many MTU-23 packets.
-    var binPerChunk=Math.max(20,Math.floor((blePayloadMax-1)/2));
-    var partLen=binPerChunk*2;  // hex chars per write
+    // Send data chunks (0x03 + hex data)
     var dataHex=chunkHex;
     while(dataHex.length>0){
       var curLen=Math.min(partLen,dataHex.length);
@@ -1233,27 +1268,37 @@ async function fwSend(){
     var bankAddr=0x20000+pos;
     var addrHex=decimalToHex(bankAddr,8);
     try{await sendCmd(hexToBytes('02'+addrHex))}catch(e){ta.value='写入失败';setBusy(false);return}
-    // No fixed delay: WWR backpressure (await) already paces the data stream.
+    await waitMs(50);   // 与原版 ATC 一致:每银行写入后延时 50ms
     pos+=bankSize;
     var pct=(pos/b.length*100).toFixed(1);
     var elapsed=((new Date().getTime()-startTime)/1000).toFixed(1);
     ta.value='写入: '+pos+'/'+b.length+' ('+pct+'%) '+elapsed+'s';
   }
 
-  // CRC check and final write
-  var crc=calculateCRC(hexStr);
-  ta.value='校验CRC='+crc+'...';
-  /* NOTE: do NOT send the 0x06 CRC-check command here.
-     The firmware's cmd-7 (final flash) guards write_ota_firmware_to_flash()
-     with (out_buffer[5]==crc_out>>8 && out_buffer[6]==crc_out&0xff).
-     crc_out is reset to 0 during erase/write and out_buffer stays zeroed,
-     so the guard passes only while crc_out==0.  Issuing 0x06 would populate
-     crc_out with the real checksum and make the guard fail, leaving the
-     device NOT flashed and NOT rebooting.  This matches the reference
-     OTA_writing.html, which calls only doFinalFlash(). */
-  try{await doFinalFlash(crc)}catch(e){}
+  // 最终刷写:设备端(cmd 7)会重新计算 OTA 暂存区实际校验和并与期望值比对,
+  // 不匹配则拒绝刷写并通知 [0x08](设备保持存活,不会把残缺镜像刷入卡死)。
+  // 期望值 = sum(固件字节 + 0xFF 补齐到 0x20000) mod 65536,与设备端一致。
+  var expect=0;
+  for(var p=0;p<0x20000;p++){ expect += (p<b.length)?b[p]:0xff; }
+  expect &= 0xffff;
+  var expectHex=('000'+expect.toString(16)).slice(-4);
+  ta.value='校验: 期望 0x'+expectHex+' ...';
+  otaFailFlag=0;otaDevCRC=-1;otaFlashStarted=0;
+  var cmd7err=false;
+  try{await doFinalFlash(expectHex)}catch(e){cmd7err=true;log('OTA 最终刷写命令发送异常（若此前设备已确认刷写，则这是设备重启导致的正常现象）: '+e)}
+  // 三种明确结果:0x08=拒绝;0x09 或 cmd7 发送失败(设备已重启)= 成功;都无=命令未送达。
+  await waitMs(2500);
   setBusy(false);
-  ta.value='✅ 固件刷写完成！CRC='+crc+'，设备将自动重启';
+  if(otaFailFlag){
+    if(otaDevCRC>=0)
+      ta.value='❌ 校验失败：设备端实际校验和 0x'+('000'+otaDevCRC.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，上传数据不完整，未刷写';
+    else
+      ta.value='❌ 校验失败：设备拒绝刷写（上传不完整），未刷写';
+  }else if(otaFlashStarted || cmd7err){
+    ta.value='✅ 设备已确认刷写并重启（若未收到 0x09，则 cmd7 发送失败 = 设备已重启）。约 5 秒后可重新连接，确认版本 FW 1.0X';
+  }else{
+    ta.value='⚠ 未收到设备确认：刷写命令可能未送达，请重试';
+  }
 }
 
 function calculateCRC(data){
@@ -1266,8 +1311,8 @@ function calculateCRC(data){
   return decimalToHex(outCRC&0xffff,4);
 }
 
-async function doFinalFlash(crc){
-  await sendCmd(hexToBytes('07C001CEED'+crc));
+async function doFinalFlash(crcHex){
+  await sendCmd(hexToBytes('07C001CEED'+crcHex));
 }
 
 function decimalToHex(d,padding){var hex=Number(d).toString(16);padding=typeof(padding)==='undefined'||padding===null?padding=2:padding;while(hex.length<padding){hex='0'+hex;}return hex;}

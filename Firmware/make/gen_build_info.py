@@ -8,9 +8,10 @@ Usage:  python gen_build_info.py <output_header_path>
 """
 import sys, os, datetime
 
-FW_MAJOR = 0
-FW_MINOR = 9
+FW_MAJOR = 1
+FW_MINOR = 0
 FW_PATCH = 0
+FW_VERSION_STR = "1.0X"
 
 def main():
     if len(sys.argv) < 2:
@@ -30,11 +31,13 @@ def main():
 #define FW_VERSION_MINOR {min}
 #define FW_VERSION_PATCH {pat}
 
+#define FW_VERSION_STR "{vstr}"
+
 #define BUILD_DATE "{date}"   /* YYYY-MM-DD */
 #define BUILD_TIME "{time}"   /* HH:MM:SS  */
 
 #endif /* BUILD_INFO_H */
-""".format(maj=FW_MAJOR, min=FW_MINOR, pat=FW_PATCH, date=date_str, time=time_str)
+""".format(maj=FW_MAJOR, min=FW_MINOR, pat=FW_PATCH, vstr=FW_VERSION_STR, date=date_str, time=time_str)
 
     # Only rewrite if the content changed, to avoid touching the timestamp
     # unnecessarily (and re-triggering rebuilds of dependents in incremental

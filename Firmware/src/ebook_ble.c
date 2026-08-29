@@ -13,7 +13,7 @@
 
 // Upload state (active only during upload)
 static struct {
-	uint8_t  active;        // 0=idle, 1=book, 2=font
+	uint8_t  active;        // 0=idle, 1=book, 2=font, 3=gbk_font
 	uint8_t  book_idx;
 	uint32_t write_offset;  // current flash write position
 	uint32_t total_len;     // expected total bytes
@@ -108,7 +108,7 @@ static void upload_flush_staging(void)
 	staging_len = 0;
 
 	if (upload.written - notify_watermark >= UPLOAD_NOTIFY_STEP)
-		upload_notify_progress(upload.active == 2 ? 0x17 : 0x11);
+		upload_notify_progress(upload.active == 2 ? 0x17 : (upload.active == 3 ? 0x1C : 0x11));
 }
 
 static void upload_feed_data(uint8_t *data, uint16_t data_len)
@@ -196,6 +196,9 @@ static void handle_book_begin(uint8_t *payload, unsigned int payload_len)
 	                     payload[data_off+2];
 	uint8_t encoding = payload[data_off + 3];
 
+	// 0=ASCII, 1=GB2312, 2=GBK(含繁体,需 GBK 扩展大字库)
+	if (encoding > EB_ENC_GBK) { resp[1] = 0x03; notify_epd(resp, 3); return; }
+
 	// Take the upload lock + wait for any in-flight refresh BEFORE touching the
 	// catalog/flash.  On 0xFE the host retries -- far better than silently
 	// racing the SPI bus.
@@ -210,9 +213,10 @@ static void handle_book_begin(uint8_t *payload, unsigned int payload_len)
 		return;
 	}
 
-	// Find free flash space
+	// Find free flash space.  Books must stay below the GBK 大字库区
+	// (EB_GBK_FONT_ADDR), which lives at the top of flash.
 	uint32_t start = ebook_find_free_space();
-	if (start + total_len > EB_FLASH_END) { upload.active = 0; resp[1] = 0x02; notify_epd(resp, 3); return; }
+	if (start + total_len > EB_GBK_FONT_ADDR) { upload.active = 0; resp[1] = 0x02; notify_epd(resp, 3); return; }
 
 	// Initialize upload state (upload.active already set to 1 by quiesce)
 	upload.book_idx = slot;
@@ -300,10 +304,10 @@ static void handle_book_delete(uint8_t *payload, unsigned int payload_len)
 
 static void handle_status(void)
 {
-	// 0x19: [font][book_count][lock_img][att_mtu]
-	uint8_t resp[5] = {0x19, 0, 0, 0, 0};
+	// 0x19: [font][book_count][lock_img][att_mtu][gbk_font]
+	uint8_t resp[6] = {0x19, 0, 0, 0, 0, 0};
 
-	if (!ext_flash_is_safe()) { notify_epd(resp, 5); return; }
+	if (!ext_flash_is_safe()) { notify_epd(resp, 6); return; }
 	ext_flash_init();
 
 	// Font: double check
@@ -329,7 +333,13 @@ static void handle_status(void)
 	resp[3] = (lock_flag == EB_LOCK_IMG_FLAG_VALUE) ? 1 : 0;
 	resp[4] = (uint8_t)ble_get_effective_mtu();
 
-	notify_epd(resp, 5);
+	// GBK 扩展大字库:检查 WQY1 magic
+	uint8_t gbk_magic[4];
+	ext_flash_read(EB_GBK_FONT_ADDR, 4, gbk_magic);
+	resp[5] = (gbk_magic[0] == EB_GBK_FONT_MAGIC0 && gbk_magic[1] == EB_GBK_FONT_MAGIC1 &&
+	           gbk_magic[2] == EB_GBK_FONT_MAGIC2 && gbk_magic[3] == EB_GBK_FONT_MAGIC3) ? 1 : 0;
+
+	notify_epd(resp, 6);
 }
 
 static void handle_catalog_compact(uint8_t *payload, unsigned int payload_len)
@@ -685,6 +695,76 @@ static void handle_font_end(uint8_t *payload, unsigned int payload_len)
 	memset(&upload, 0, sizeof(upload));
 }
 
+// --- GBK 扩展大字库上传 (WQY_GBK16.bin) ---
+// 与字体上传同机制,写往 Flash 顶部的 EB_GBK_FONT_ADDR。文件带 "WQY1"
+// magic 头,渲染时(ebook.c)据此判定已安装。
+
+static void handle_gbk_font_begin(uint8_t *payload, unsigned int payload_len)
+{
+	uint8_t resp[2] = {0x1B, 0xFF};
+	if (payload_len < 4) { notify_epd(resp, 2); return; }
+
+	uint32_t total = ((uint32_t)payload[1] << 16) |
+	                 ((uint32_t)payload[2] << 8) |
+	                 payload[3];
+
+	if (total == 0 || EB_GBK_FONT_ADDR + total > EB_LOCK_IMG_ADDR) {
+		resp[1] = 0x02;   // 越界:不能盖到锁屏图/进度区
+		notify_epd(resp, 2);
+		return;
+	}
+
+	if (!upload_begin_quiesce(3)) { resp[1] = 0xFE; notify_epd(resp, 2); return; }
+
+	upload.write_offset = EB_GBK_FONT_ADDR;
+	upload.total_len = total;
+	upload.next_erase = EB_GBK_FONT_ADDR;
+
+	ble_set_connection_speed(6);
+	upload_log_link_diag("GBKFBEGIN");
+
+	resp[1] = 0x00;
+	notify_epd(resp, 2);
+}
+
+static void handle_gbk_font_data(uint8_t *payload, unsigned int payload_len)
+{
+	uint8_t resp[4] = {0x1C, 0, 0, 0};
+	if (upload.active != 3 || payload_len < 2) { notify_epd(resp, 4); return; }
+
+	uint16_t data_len = payload_len - 1;
+	uint8_t *data = &payload[1];
+
+	upload_feed_data(data, data_len);
+	if (upload.written - notify_watermark >= UPLOAD_NOTIFY_STEP)
+		upload_notify_progress(0x1C);
+}
+
+static void handle_gbk_font_end(uint8_t *payload, unsigned int payload_len)
+{
+	uint8_t resp[2] = {0x1D, 0xFF};
+	if (upload.active != 3) { notify_epd(resp, 2); return; }
+
+	upload_flush_staging();
+	upload_notify_progress(0x1C);
+
+	// 校验 magic,防止上传了错误的文件
+	ext_flash_init();
+	uint8_t m[4];
+	ext_flash_read(EB_GBK_FONT_ADDR, 4, m);
+	if (m[0] != EB_GBK_FONT_MAGIC0 || m[1] != EB_GBK_FONT_MAGIC1 ||
+	    m[2] != EB_GBK_FONT_MAGIC2 || m[3] != EB_GBK_FONT_MAGIC3) {
+		resp[1] = 0x04;   // magic 不对
+		notify_epd(resp, 2);
+		memset(&upload, 0, sizeof(upload));
+		return;
+	}
+
+	resp[1] = 0x00;
+	notify_epd(resp, 2);
+	memset(&upload, 0, sizeof(upload));
+}
+
 // --- Ebook control ---
 
 static void handle_ebook_open(uint8_t *payload, unsigned int payload_len)
@@ -834,6 +914,9 @@ int ebook_ble_handle_command(uint8_t *payload, unsigned int payload_len)
 	case 0x16: handle_font_begin(payload, payload_len); break;
 	case 0x17: handle_font_data(payload, payload_len); break;
 	case 0x18: handle_font_end(payload, payload_len); break;
+	case 0x1B: handle_gbk_font_begin(payload, payload_len); break;
+	case 0x1C: handle_gbk_font_data(payload, payload_len); break;
+	case 0x1D: handle_gbk_font_end(payload, payload_len); break;
 	case 0x20: handle_ebook_open(payload, payload_len); break;
 	case 0x21: handle_ebook_close(payload, payload_len); break;
 	case 0x30: handle_lock_img_begin(payload, payload_len); break;

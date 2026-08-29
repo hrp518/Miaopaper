@@ -28,6 +28,11 @@ extern const unsigned short g_sleep_timeout_s[SLEEP_TIMEOUT_COUNT];
 #define EPD_GC_INTERVAL_COUNT 4
 extern const unsigned short g_epd_gc_interval[EPD_GC_INTERVAL_COUNT];
 
+// 锁屏轮询唤醒周期(ms)。锁屏时广播已停止,MCU 靠 32k 应用唤醒定时器按此
+// 周期醒来轮询按钮(见 app.c)。唤醒间隔 = 按钮响应的最坏等待时间,也是
+// 锁屏电流的主要决定因素:1000ms 与旧版 1s 广播唤醒体验一致。
+#define LOCK_POLL_MS  1000
+
 #define RAM _attribute_data_retention_ // short version, this is needed to keep the values in ram after sleep
 
 #include "application/print/u_printf.h"

@@ -48,7 +48,7 @@ void reset_settings_to_default(void)
 	settings.ebook_prev_char_pos = 0;
 	settings.ble_enabled = 1;        // BLE on by default
 	settings.sleep_timeout_idx = 2;  // 60s by default
-	settings.epd_partial_enabled = 0; // scene-switch full by default (局刷码关)
+	settings.lock_read_enabled = 0;  // 阅读锁屏模式默认关: 锁屏仍显示屏保图
 	settings.epd_gc_interval_idx = 0; // GC every 10 partial refreshes
 }
 
