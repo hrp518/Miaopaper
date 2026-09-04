@@ -284,7 +284,20 @@ window.onload = function() {
         reader.onload = function() {
             firmwareArray = this.result;
             log("File was selected, size: " + firmwareArray.byteLength + " bytes");
-            if(firmwareArray.byteLength < 16 || (new Uint32Array(firmwareArray.slice(8,12)))[0] != 0x544C4E4B){
+            var u8 = new Uint8Array(firmwareArray);
+            var isTelink = firmwareArray.byteLength >= 16 &&
+                u8[8] == 0x4b && u8[9] == 0x4e && u8[10] == 0x4c && u8[11] == 0x54;
+            if(!isTelink) {
+				// Telink full-flash dump: firmware image may sit at any 4KB-aligned slot
+                for(var foff = 0x1008; foff + 4 <= u8.byteLength; foff += 0x1000) {
+                    if(u8[foff] == 0x4b && u8[foff+1] == 0x4e && u8[foff+2] == 0x4c && u8[foff+3] == 0x54) {
+                        isTelink = true;
+                        log("Telink image header found at 0x" + hex(foff - 8, 6) + " (full flash dump)");
+                        break;
+                    }
+                }
+            }
+            if(!isTelink){
 				log("Select file is no telink firmware .bin");
 				alert("Select file is no telink firmware .bin");
 				firmwareArray = null;

@@ -14,6 +14,7 @@
 #include "button_scan.h"
 #include "ext_flash.h"
 #include "epd_bw_213.h"
+#include "sleep_log.h"
 
 #define testPin GPIO_PD3
 void cmd_parser(void * p){
@@ -47,6 +48,8 @@ void cmd_parser(void * p){
 		adc_scan_set_enabled(adc_scan_is_enabled() ? 0 : 1);
 	}else if(inData == 0xB9){// Toggle continuous chip-supply (VDD) monitor via internal VBAT/3 channel
 		vdd_scan_set_enabled(vdd_scan_is_enabled() ? 0 : 1);
+	}else if(inData == 0x48 || inData == 0x49){// Free/unused GPIO change monitor (only prints changed pins)
+		free_gpio_monitor_start();
 	}else if(inData == 0xB0){
 		settings.show_batt_enabled = false;//Disable battery on LCD
 	}else if(inData == 0xA0){
@@ -230,6 +233,72 @@ void cmd_parser(void * p){
 	else if(inData == 0xF1){// Set flip_v (horizontal flip)
 		epd_flip_v = req->dat[1] ? 1 : 0;
 		set_EPD_wait_flush();
+	}
+	else if(inData == 0xF6){// Dump sleep-diagnostic log (newest first) from ext flash 0x7FD000
+		slp_log_dump();
+	}
+	else if(inData == 0xF7){// Clear sleep-diagnostic log (erase sector 0x7FD000)
+		slp_log_clear();
+	}
+	else if(inData == 0xF8){// GPIO raw control, FREE pins only (QFN32): F8 + pin + act
+		// pin: 0x01=PB1 0x02=PC2 0x03=PC3, 0x00=ALL (only for act=2 read-all)
+		// act: 0=push-pull LOW 1=push-pull HIGH 2=read level 3=release(high-Z input)
+		// 推挽强驱动:AS_GPIO + OE=1 + 写寄存器,高低都可灌/拉数 mA,不是 1M 弱上拉。
+		// 驱动状态会跨 deep retention 保留(锁屏后仍保持),直到被改回/释放。
+		// 注意:BLE 0xB8 ADC 扫描会把 PB1 切到 ADC 功能,扫描期间驱动失效。
+		{
+			uint8_t pin_code = req->dat[1];
+			uint8_t act = req->dat[2];
+			static const uint32_t pins[3] = {GPIO_PB1, GPIO_PC2, GPIO_PC3};
+			static const char *const names[3] = {"PB1", "PC2", "PC3"};
+			char buff[40];
+
+			if (pin_code > 3 || act > 3 ||
+			    (pin_code == 0 && act != 2)) {
+				ble_log("GPIO: args (F8 pin act; pin 1=PB1 2=PC2 3=PC3)");
+			} else if (act == 2) {
+				if (pin_code == 0) {
+					int v0, v1, v2, i;
+					for (i = 0; i < 3; i++) {
+						gpio_set_func(pins[i], AS_GPIO);
+						gpio_setup_up_down_resistor(pins[i], PM_PIN_UP_DOWN_FLOAT);
+						gpio_set_output_en(pins[i], 0);
+						gpio_set_input_en(pins[i], 1);
+					}
+					v0 = gpio_read(pins[0]) ? 1 : 0;
+					v1 = gpio_read(pins[1]) ? 1 : 0;
+					v2 = gpio_read(pins[2]) ? 1 : 0;
+					sprintf(buff, "GPIO RD: PB1=%d PC2=%d PC3=%d", v0, v1, v2);
+					ble_log(buff);
+				} else {
+					uint32_t p = pins[pin_code - 1];
+					gpio_set_func(p, AS_GPIO);
+					gpio_setup_up_down_resistor(p, PM_PIN_UP_DOWN_FLOAT);
+					gpio_set_output_en(p, 0);
+					gpio_set_input_en(p, 1);
+					sprintf(buff, "GPIO %s READ=%d (high-Z)",
+					        names[pin_code - 1], gpio_read(p) ? 1 : 0);
+					ble_log(buff);
+				}
+			} else if (act == 3) {
+				uint32_t p = pins[pin_code - 1];
+				gpio_set_func(p, AS_GPIO);
+				gpio_setup_up_down_resistor(p, PM_PIN_UP_DOWN_FLOAT);
+				gpio_set_output_en(p, 0);
+				gpio_set_input_en(p, 1);
+				sprintf(buff, "GPIO %s released (high-Z)", names[pin_code - 1]);
+				ble_log(buff);
+			} else {
+				uint32_t p = pins[pin_code - 1];
+				gpio_set_func(p, AS_GPIO);
+				gpio_setup_up_down_resistor(p, PM_PIN_UP_DOWN_FLOAT);
+				gpio_set_output_en(p, 1);   // push-pull strong drive
+				gpio_set_input_en(p, 0);
+				gpio_write(p, act);         // act=0 LOW / 1 HIGH
+				sprintf(buff, "GPIO %s=%d (push-pull)", names[pin_code - 1], act);
+				ble_log(buff);
+			}
+		}
 	}
 	else if(inData == 0xF2){// Set byte_flip (FixBuffer byte reverse)
 		epd_byte_flip = req->dat[1] ? 1 : 0;

@@ -22,6 +22,7 @@
 #include "ebook_buttons.h"
 #include "ebook.h"
 #include "ble.h"
+#include "app.h"
 #include "lwbtn.h"
 
 #define LONG_PRESS_MS          1000
@@ -57,7 +58,7 @@ RAM uint32_t    btn_last_10ms;
 
 static void on_click_front(void)
 {
-    if (eb_mode == EB_MODE_LOCK) ebook_handle_unlock();
+    if (eb_mode == EB_MODE_LOCK) { app_lock_observe(); /* 单点击不解锁,仅GC全刷显示"Double Click to Unlock" */ }
     else if (eb_mode == EB_MODE_SELECT) ebook_select_confirm();
     else if (eb_mode == EB_MODE_SETTINGS) ebook_settings_change();
     else if (eb_mode == EB_MODE_ABOUT) ebook_exit_about();
@@ -66,7 +67,8 @@ static void on_click_front(void)
 
 static void on_dblclick_front(void)
 {
-    if (eb_mode == EB_MODE_READ) ebook_prev_page();
+    if (eb_mode == EB_MODE_LOCK) ebook_handle_unlock();   // 双击 F 解锁
+    else if (eb_mode == EB_MODE_READ) ebook_prev_page();
 }
 
 /* Per the UI spec, ONLY the F button supports double-click to reverse the
@@ -123,7 +125,7 @@ static void btn_evt(lwbtn_t *lwobj, lwbtn_btn_t *btn, lwbtn_evt_t evt)
             } else if (id == BTN_ID_FRONT) {
                 ble_log("BTN:FL");
                 if (eb_mode == EB_MODE_LOCK) {
-                    ebook_handle_unlock();
+                    /* 长按 F 不再解锁(改为双击 F 解锁),长按仅当作锁屏已锁无动作 */
                 } else {
                     ebook_handle_lock();
                 }
@@ -187,7 +189,10 @@ static void btn_reconfig_gpio(void)
         gpio_set_func(pins[i], AS_GPIO);
         gpio_set_output_en(pins[i], 0);
         gpio_set_input_en(pins[i], 1);
-        gpio_setup_up_down_resistor(pins[i], PM_PIN_PULLUP_1M);
+        /* 10K 上拉(原 1M):该模拟电阻深睡期间保留,正是 pad 唤醒的检测上拉。
+         * 1M 太弱,EPD 刷新等耦合噪声易误拉低 → 毛刺误唤醒;10K 抗噪强 100 倍。
+         * 平时按键开路无电流路径,不额外耗电;按下时 3.3V/10K≈0.3mA(瞬态,无妨)。 */
+        gpio_setup_up_down_resistor(pins[i], PM_PIN_PULLUP_10K);
     }
 }
 

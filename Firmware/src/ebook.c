@@ -14,6 +14,7 @@
 #include "battery.h"
 #include "epd_refresh.h"
 #include "buttons.h"
+#include "sleep_log.h"
 
 #ifndef PROGMEM
 #define PROGMEM
@@ -1261,6 +1262,21 @@ void ebook_render_lock(void)
 	epd_partial_ready = 1;
 }
 
+// 深睡浅醒观察屏:pad 唤醒后若未随双击解锁,GC 全刷显示 "Double Click to Unlock"。
+// 用于观察是否毛刺触发唤醒(屏幕一刷新说明 MCU 被叫醒)。
+void ebook_render_lock_hint(void)
+{
+	render_pending = 0;
+	epd_clear();
+	obdCreateVirtualDisplay(&obd, EB_DISP_W, EB_DISP_H, epd_temp);
+	obdFill(&obd, 0, 0);
+	obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 60, 46, "Locked", 1);
+	obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 12, 70, "Double Click to Unlock", 1);
+	FixBuffer(epd_temp, epd_buffer, EB_DISP_W, EB_DISP_H);
+	EPD_Display(epd_buffer, NULL, EB_DISP_W * EB_DISP_H / 8, 1);  // full GC
+	epd_partial_ready = 1;
+}
+
 void ebook_handle_lock(void)
 {
 	if (eb_mode == EB_MODE_LOCK) return;   // already locked
@@ -1271,12 +1287,18 @@ void ebook_handle_lock(void)
 	/* 省电:锁屏期间停止 BLE 广播。唤醒改由 app.c 的 32k 轮询定时器保证
 	 * (见 LOCK_POLL_MS),不再依赖广播事件,因此锁屏时不会有任何 RF 发射。
 	 * 解锁时(ebook_handle_unlock)按设置恢复广播。 */
-	ble_set_advertising(0);
+	/* 锁屏深睡(方案B'):广播保留但间隔拉长到 2s → 栈在广播间隔间进入
+	 * DEEPSLEEP_RETENTION_ADV(整机 ~5µA),按键秒醒,手机 2-4s 可发现。
+	 * 旧方案"关广播"会让链路进入 IDLE,栈回落普通 suspend(几十 µA),
+	 * 反而更费电且深睡路径被堵死。 */
+	if (settings.ble_enabled)
+		ble_adv_slow_for_lock();
 	{	// Debug: did the lock actually run, and does the panel state allow it?
 		char lk[48];
 		sprintf(lk, "LK:LOCK prev=%d st=%d", eb_prev_mode, epd_update_state);
 		ble_log(lk);
 	}
+	slp_log_lock((uint8_t)eb_prev_mode);   // 休眠诊断:记录加锁事件
 	/* Lock screen: scene change, force full refresh.  (ebook_render_lock
 	 * already passes full=1; clearing the flag keeps the state consistent so
 	 * the following unlock re-establishes a clean base map.) */
@@ -1296,9 +1318,9 @@ void ebook_handle_lock(void)
 void ebook_handle_unlock(void)
 {
 	if (eb_mode != EB_MODE_LOCK) return;
-	/* 恢复广播(锁屏时被关掉)。BLE 关闭设置的用户保持关闭。 */
+	/* 恢复广播(锁屏时拉长了间隔):还原 1s 快广播。BLE 关闭设置的用户保持关闭。 */
 	if (settings.ble_enabled)
-		ble_set_advertising(1);
+		ble_adv_restore_fast();
 	// Restore the screen the user was on before locking.  If it was a
 	// menu (SETTINGS/SELECT/ABOUT), always go back to CLOCK on unlock --
 	// users don't expect to land on a settings screen after lock+unlock.
@@ -1313,6 +1335,7 @@ void ebook_handle_unlock(void)
 		sprintf(lk, "LK:UNLK mode=%d p=%d st=%d", eb_mode, epd_partial_ready, epd_update_state);
 		ble_log(lk);
 	}
+	slp_log_unlock();   // 休眠诊断:记录解锁事件
 	if (eb_mode == EB_MODE_READ) {
 		/* Unlock restores a NEW scene: drop partial so the first page is a
 		 * full refresh (fresh 0x26 base), not a diff against the lock image

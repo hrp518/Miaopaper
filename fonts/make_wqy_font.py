@@ -81,6 +81,26 @@ def parse_bdf(path):
     return glyphs
 
 
+def mirror16(v):
+    """Reverse the 16 bits of one row (horizontal mirror)."""
+    r = 0
+    for i in range(16):
+        if v & (1 << i):
+            r |= 1 << (15 - i)
+    return r
+
+
+def hshift_row(v, s):
+    """Shift one 16-bit row by s columns (clamp at the edges)."""
+    nv = 0
+    for c in range(16):
+        if v & (0x8000 >> c):
+            nc = c + s
+            if 0 <= nc < 16:
+                nv |= 0x8000 >> nc
+    return nv
+
+
 def place_into_cell(g):
     w, h, xoff, yoff = g["w"], g["h"], g["xoff"], g["yoff"]
     cell = [0] * CELL
@@ -101,6 +121,60 @@ def place_into_cell(g):
                 col = xoff + px
                 if 0 <= col < CELL and (byte & (0x80 >> bit)):
                     cell[cr] |= 1 << (15 - col)
+
+    # ------------------------------------------------------------------
+    # Vertical re-positioning of "floating" half-width punctuation.
+    #
+    # The wqy 12pt BDF lays ASCII-style punctuation (quotes, 、。…) out on
+    # the LATIN baseline (BDF y ≈ 0..10), which the raw conversion maps to
+    # cell rows 2..15.  Mixed into a CJK 16x16 line that puts the marks
+    # "underground" (quotes at rows 12-15) or "in the sky" (、。 at rows
+    # 2-6).  Only small marks (h < 8) are affected -- full-height brackets
+    # (《》「」【】…) and ideographs already fill the cell correctly:
+    #   yoff >= 8   -> high marks (quotes “”‘’): top edge to cell row 4
+    #   yoff <= 1   -> low marks (、。):          bottom edge to cell row 13
+    #   1 < yoff < 8 -> already near the centre (·, —, …): leave alone
+    if h < 8:
+        if yoff >= 8:
+            shift = 4 - (yoff + 2)              # move up
+        elif yoff <= 1:
+            shift = 13 - (yoff + 2 + h - 1)     # move down to the baseline
+        else:
+            shift = 0
+        if shift:
+            ncell = [0] * CELL
+            for r in range(CELL):
+                nr = r + shift
+                if 0 <= nr < CELL:
+                    ncell[nr] = cell[r]
+            cell = ncell
+    elif h < 13:
+        # Half-height punctuation (：；+ - etc.) that the BDF pushes toward
+        # the top of the em: re-centre vertically at cell row 8 so the marks
+        # sit in the lower-middle rather than jammed at the very top.  E.g.
+        # ；has its dot at rows 0-1 (top) before this correction; after it
+        # the dot sits near the middle and the tail by the baseline.
+        center = (yoff + 2) + h // 2
+        shift = 8 - center
+        if shift > 0:
+            ncell = [0] * CELL
+            for r in range(CELL):
+                nr = r + shift
+                if 0 <= nr < CELL:
+                    ncell[nr] = cell[r]
+            cell = ncell
+
+    # ------------------------------------------------------------------
+    # Horizontal placement of quotes.  In the BDF the opening quote “ sits
+    # in the RIGHT half of its Latin cell and the closing ” in the LEFT
+    # half (Latin text flows L->R).  In a full-width CJK cell the opening
+    # quote must hang at the LEFT and the closing at the RIGHT.  Slide the
+    # glyph across WITHOUT mirroring -- mirroring flips the mark shape
+    # backwards (observed: the quotes looked left-right reversed).
+    if g["cp"] in (0x201C, 0x2018):
+        cell = [hshift_row(v, -8) for v in cell]
+    elif g["cp"] in (0x201D, 0x2019):
+        cell = [hshift_row(v, +8) for v in cell]
     return cell
 
 

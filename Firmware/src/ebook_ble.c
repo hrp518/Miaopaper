@@ -796,6 +796,43 @@ extern uint8_t epd_temp[];
 extern uint8_t epd_buffer[];
 extern OBDISP obd;
 
+// 0x46: start button/charge level monitor (raw GPIO reads, see button_scan.c)
+// 0x47: stop it.
+// 0x48: start free/unused GPIO change monitor; 0x49: stop it.
+extern void btn_level_monitor_start(void);
+extern void btn_level_monitor_stop(void);
+extern void free_gpio_monitor_start(void);
+extern void free_gpio_monitor_stop(void);
+static void handle_btn_monitor_start(uint8_t *payload, unsigned int payload_len)
+{
+	(void)payload; (void)payload_len;
+	btn_level_monitor_start();
+	uint8_t resp[2] = {0x46, 0x00};
+	notify_epd(resp, 2);
+}
+static void handle_btn_monitor_stop(uint8_t *payload, unsigned int payload_len)
+{
+	(void)payload; (void)payload_len;
+	btn_level_monitor_stop();
+	uint8_t resp[2] = {0x47, 0x00};
+	notify_epd(resp, 2);
+}
+static void handle_freegpio_start(uint8_t *payload, unsigned int payload_len)
+{
+	(void)payload; (void)payload_len;
+	free_gpio_monitor_start();
+	uint8_t resp[2] = {0x48, 0x00};
+	notify_epd(resp, 2);
+}
+static void handle_freegpio_stop(uint8_t *payload, unsigned int payload_len)
+{
+	(void)payload; (void)payload_len;
+	// 0x49 与 0x48 等价:都是触发"空闲 GPIO 变化监视",只报变化的 pin
+	free_gpio_monitor_start();
+	uint8_t resp[2] = {0x49, 0x00};
+	notify_epd(resp, 2);
+}
+
 static void handle_debug_draw(uint8_t *payload, unsigned int payload_len)
 {
 	uint8_t resp[3] = {0x40, 0xFF, 0};
@@ -930,6 +967,10 @@ int ebook_ble_handle_command(uint8_t *payload, unsigned int payload_len)
 	case 0x42: handle_pc1_weak_pulldown(payload, payload_len); break;
 	case 0x43: handle_pc1_strong_pulldown(payload, payload_len); break;
 	case 0x44: handle_pc1_hiz(payload, payload_len); break;
+	case 0x46: handle_btn_monitor_start(payload, payload_len); break;
+	case 0x47: handle_btn_monitor_stop(payload, payload_len); break;
+	case 0x48: handle_freegpio_start(payload, payload_len); break;
+	case 0x49: handle_freegpio_stop(payload, payload_len); break;
 	default: return 0;
 	}
 	return 1;

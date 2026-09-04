@@ -10,6 +10,11 @@ uint8_t ext_flash_is_safe(void)
     return (epd_update_state == 0) ? 1 : 0;
 }
 
+// 深度断电状态:powered_down=1 表示 Flash 处于 0xB9 深断电,任意 SPI 事务前
+// 需先发 0xAB 唤醒。关键:必须放进 .retention_data —— 深度保留睡眠不清除,
+// 否则断电后标志被清零,唤醒路径会误判"已醒"而跳过 0xAB,读取直接失败。
+_attribute_data_retention_ static uint8_t flash_powered_down = 0;
+
 void ext_flash_init(void)
 {
     if (epd_update_state) return;
@@ -58,8 +63,35 @@ static uint8_t flash_spi_rx(void)
     return val;
 }
 
+// 发一条 0xAB 释放深度断电并等待唤醒完成。(NOR 唤醒延迟 ~ tens of us)
+void ext_flash_wake_up(void)
+{
+    if (!flash_powered_down)
+        return;
+    gpio_write(FLASH_CS, 0);
+    flash_spi_tx(0xAB);
+    gpio_write(FLASH_CS, 1);
+    flash_powered_down = 0;
+    WaitUs(60);   // 深度断电唤醒时间 (tRES1),留足裕量再访问
+}
+
+// 进入深度断电(0xB9):休眠阶段把 Flash 从 standby(数十 uA)降到 ~1-2 uA。
+// 幂等:已在深断电则直接返回。下次任意 Flash 访问会自动 0xAB 唤醒。
+void ext_flash_deep_power_down(void)
+{
+    if (flash_powered_down)
+        return;
+    // 深度保留睡眠不保留 GPIO 配置,先 ext_flash_init 确保 SPI 引脚有效
+    ext_flash_init();
+    gpio_write(FLASH_CS, 0);
+    flash_spi_tx(0xB9);
+    gpio_write(FLASH_CS, 1);
+    flash_powered_down = 1;
+}
+
 void ext_flash_read_jedec_id(uint8_t buf[3])
 {
+    ext_flash_wake_up();
     gpio_write(FLASH_CS, 0);
     flash_spi_tx(0x9F);
     buf[0] = flash_spi_rx();
@@ -71,6 +103,7 @@ void ext_flash_read_jedec_id(uint8_t buf[3])
 uint8_t ext_flash_read_status(void)
 {
     uint8_t status;
+    ext_flash_wake_up();
     gpio_write(FLASH_CS, 0);
     flash_spi_tx(0x05);
     status = flash_spi_rx();
@@ -87,6 +120,7 @@ void ext_flash_wait_ready(void)
 
 void ext_flash_write_enable(void)
 {
+    ext_flash_wake_up();
     gpio_write(FLASH_CS, 0);
     flash_spi_tx(0x06);
     gpio_write(FLASH_CS, 1);
@@ -94,6 +128,7 @@ void ext_flash_write_enable(void)
 
 void ext_flash_read(uint32_t addr, uint16_t len, uint8_t *buf)
 {
+    ext_flash_wake_up();
     gpio_write(FLASH_CS, 0);
     flash_spi_tx(0x03);
     flash_spi_tx((addr >> 16) & 0xFF);

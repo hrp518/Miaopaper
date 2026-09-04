@@ -161,7 +161,11 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
   </div>
   <div class="row" style="margin-top:8px">
     <span class="fade">阅读控制: </span>
-    <button onclick="sendCmd(new Uint8Array([0x21]))">退出</button>
+    <button onclick="uiCmd(new Uint8Array([0x21]))">退出</button>
+    <button onclick="uiCmd(new Uint8Array([0x46]))">监视按钮电平(0x46)</button>
+    <button onclick="uiCmd(new Uint8Array([0x47]))">停止(0x47)</button>
+    <button onclick="uiCmd(new Uint8Array([0x48]))">监视空闲GPIO(0x48)</button>
+    <button onclick="uiCmd(new Uint8Array([0x49]))">监视空闲GPIO(0x49)</button>
     <span class="fade" style="font-size:11px">时钟: L设置/R书单 阅读F下一页/F双击上一页/L上一页/R下一页 长按F锁屏 长按R退出</span>
   </div>
 </div>
@@ -189,6 +193,39 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
   </div>
 </div>
 
+<!-- ========== GPIO 控制 ========== -->
+<h3>🔌 空闲 GPIO 控制 (0xF8)</h3>
+<div class="card">
+  <div class="row" style="font-size:11px">
+    <span class="fade">PB1 / PC2 / PC3 推挽强驱动(拉高拉低都是实际电平,可驱动外部负载)。驱动状态锁屏深睡后仍保持。开启 ADC 扫描(0xB8)会临时抢占 PB1。</span>
+  </div>
+  <div class="row">
+    <b style="width:40px">PB1</b>
+    <button onclick="gpioCtl(1,0)">拉低</button>
+    <button onclick="gpioCtl(1,1)">拉高</button>
+    <button onclick="gpioCtl(1,2)">读电平</button>
+    <button onclick="gpioCtl(1,3)">释放</button>
+  </div>
+  <div class="row">
+    <b style="width:40px">PC2</b>
+    <button onclick="gpioCtl(2,0)">拉低</button>
+    <button onclick="gpioCtl(2,1)">拉高</button>
+    <button onclick="gpioCtl(2,2)">读电平</button>
+    <button onclick="gpioCtl(2,3)">释放</button>
+  </div>
+  <div class="row">
+    <b style="width:40px">PC3</b>
+    <button onclick="gpioCtl(3,0)">拉低</button>
+    <button onclick="gpioCtl(3,1)">拉高</button>
+    <button onclick="gpioCtl(3,2)">读电平</button>
+    <button onclick="gpioCtl(3,3)">释放</button>
+  </div>
+  <div class="row">
+    <button onclick="gpioCtl(0,2)">一次读取全部三个脚</button>
+    <span class="fade" style="font-size:11px">设备应答见下方终端 [RxTx] 行,如 GPIO PC2=1 (push-pull)</span>
+  </div>
+</div>
+
 <!-- ========== 4. Terminal ========== -->
 <h3>💬 串口终端</h3>
 <div class="card">
@@ -208,6 +245,10 @@ td{padding:3px 6px;border-bottom:1px solid rgba(48,54,61,0.5)}
 <script>
 // ==================== BLE ====================
 var dev=null, gatt=null, wrChar=null, rxChar=null, conn=false;
+// 自动重连(ATC 网页同思路):意外掉线(OTA/传输中被挤掉、刷写后设备重启)自动
+// 用同一 dev 重连,无需用户再点系统选择框。用户主动 Disconnect 不触发。
+var reconnectTimer=null, reconnectTries=0, reconnectMax=5;
+var manualDisconnect=false;
 
 /* A long-running device operation is in progress (firmware flash, book / font
  * / lock-image upload).  While busy, every other interactive button in the
@@ -247,46 +288,113 @@ function doConnect(){
     alert(msg);
     return;
   }
+  // 掉线后按钮已记住设备:点 Connect 直接重连同一设备,不必再弹系统选择框。
+  if(dev&&dev.gatt&&!dev.gatt.connected){
+    manualDisconnect=false;
+    cancelReconnect();
+    log('重连 '+dev.name+' ...');
+    attachToDevice().catch(function(e){log('重连失败: '+(e&&e.message?e.message:e));onDisconnect()});
+    return;
+  }
   // 默认只显示名字以 "MPP" 开头的设备（固件广播名 MPP_XXXXXX，见 ble.c）。
   // 勾选"不筛选MPP"后改为显示所有低功耗设备，便于在设备改名/过滤失效时排查。
   var scanAll=document.getElementById('scanAll')&&document.getElementById('scanAll').checked;
   var opts={optionalServices:['0000221f-0000-1000-8000-00805f9b34fb','00001f10-0000-1000-8000-00805f9b34fb']};
   if(scanAll){opts.acceptAllDevices=true;}
   else{opts.filters=[{namePrefix:'MPP'}];}
-  navigator.bluetooth.requestDevice(opts).then(d=>{
+  navigator.bluetooth.requestDevice(opts).then(function(d){
     d.addEventListener('gattserverdisconnected',onDisconnect);
     dev=d;document.getElementById('devName').textContent=d.name;
-    return d.gatt.connect()
-  }).then(s=>{
-    gatt=s;log('GATT connected');
-    if(typeof gatt.requestMTU==='function'){
-      log('Android: 请求 MTU 247...');
-      return gatt.requestMTU(247).then(()=>gatt);
-    }
-    log('等待设备主动协商 MTU（约 0.5s，Android/fast 均可）...');
-    return gatt;
-  }).then(s=>{
-    return gatt.getPrimaryService('0000221f-0000-1000-8000-00805f9b34fb')
-  }).then(sv=>sv.getCharacteristic('0000331f-0000-1000-8000-00805f9b34fb'))
-  .then(ch=>{
-    wrChar=ch;document.getElementById('btnConnect').textContent='Disconnect';
-    refreshPayloadMax();
-    logPayloadMax('初始');
-    pollPayloadMax(10,500);
-    return wrChar.startNotifications()
-  }).then(()=>{
-    wrChar.addEventListener('characteristicvaluechanged',e=>onNotify(e.target.value));
-    return setupRxTx()
-  }).then(()=>{
-    conn=true;setStatus(true,'已连接');
-    setTimeout(function(){setTime();queryStatus();bookList();pollPayloadMax(6,1000)},2000);
-  }).catch(e=>{log('Connect err: '+e);onDisconnect()})
+    manualDisconnect=false;cancelReconnect();reconnectTries=0;
+    return attachToDevice();
+  }).catch(function(e){log('Connect err: '+e);onDisconnect()})
 }
 
+// 在已选定的 dev 上完成 GATT 连接与特征初始化 —— 首次连接、自动重连、手动重连共用。
+async function attachToDevice(){
+  if(manualDisconnect)throw DiscError();
+  gatt=await dev.gatt.connect();
+  if(manualDisconnect){try{dev.gatt.disconnect()}catch(_){ }throw DiscError('连接已取消');}
+  log('GATT connected');
+  if(typeof gatt.requestMTU==='function'){
+    log('Android: 请求 MTU 247...');
+    await gatt.requestMTU(247);
+  }else{
+    log('等待设备主动协商 MTU（约 0.5s，Android/fast 均可）...');
+  }
+  var sv=await gatt.getPrimaryService('0000221f-0000-1000-8000-00805f9b34fb');
+  var ch=await sv.getCharacteristic('0000331f-0000-1000-8000-00805f9b34fb');
+  wrChar=ch;document.getElementById('btnConnect').textContent='Disconnect';
+  refreshPayloadMax();
+  logPayloadMax('初始');
+  pollPayloadMax(10,500);
+  await wrChar.startNotifications();
+  wrChar.addEventListener('characteristicvaluechanged',function(e){onNotify(e.target.value)});
+  await setupRxTx();
+  cancelReconnect();
+  conn=true;manualDisconnect=false;
+  setStatus(true,'已连接');
+  setTimeout(function(){if(!conn)return;setTime();queryStatus();bookList();pollPayloadMax(6,1000)},2000);
+}
+
+// 断连时立刻结算所有"一次性等待"(OTA CRC/探测、ebook 应答、锁屏图回读)并把
+// busy 释放 —— 否则上传/等待中断后页面会继续空转到超时(几秒~几十秒),看起来
+// 就像"一直卡着/无限刷新"。DiscError 抛给正在进行的上传循环,让它们马上中止。
+function onLinkLost(){
+  var e=DiscError();
+  if(ebookCB!==null){
+    var er=ebookReject||ebookResolve;
+    ebookCB=null;ebookResolve=null;ebookReject=null;bookWaitSlot=-1;bookFrag=null;
+    if(er){try{er(e)}catch(_){}}   // 新版 waiter 走 reject;老 waiter 只存了 resolve
+  }
+  if(lockReadCB){
+    var lj=lockReadReject;
+    lockReadCB=null;lockReadResolve=null;lockReadReject=null;
+    if(lj){try{lj(e)}catch(_){}}
+  }
+  if(otaProbeCB!==null){otaProbeCB=null;var pr=otaProbeResolve;otaProbeResolve=null;if(pr)pr(null)}
+  if(otaCrcCB!==null){otaCrcCB=null;var cr=otaCrcResolve;otaCrcResolve=null;if(cr)cr(-1)}
+  if(listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}
+}
 function onDisconnect(){
   conn=false;wrChar=null;rxChar=null;
+  onLinkLost();
+  setBusy(false);   // 传输被断连打断时立即恢复按钮可用,避免整页卡禁用
   setStatus(false,'断开');
   document.getElementById('btnConnect').textContent='Connect';
+  // 意外掉线才自动重连(手动断开不触发;刷写成功设备重启导致的断连也走这里,
+  // 自动续上新固件)。页面在后台时先不抢着连。
+  if(!manualDisconnect&&dev&&!document.hidden)scheduleReconnect();
+}
+
+function cancelReconnect(){
+  if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null}
+}
+
+// 与 ATC 网页同思路:掉线后设备会重新广播(OTA 中断/刷写完成重启都广播),同一
+// dev 对象重连不需要用户再弹系统选择框。每次递增延时(1.2s→…)给设备留时间,
+// 最多 reconnectMax 次,仍失败就提示手动点 Connect。
+function scheduleReconnect(){
+  if(reconnectTimer)return;
+  if(reconnectTries>=reconnectMax){
+    log('自动重连 '+reconnectMax+' 次均失败，请点 Connect 手动重连');
+    reconnectTries=0;
+    return;
+  }
+  reconnectTries++;
+  var delay=reconnectTries*1200;   // 1.2 / 2.4 / 3.6 / 4.8 / 6.0 s
+  log('连接断开，'+(delay/1000).toFixed(1)+'s 后自动重连（第 '+reconnectTries+'/'+reconnectMax+' 次）...');
+  reconnectTimer=setTimeout(function(){
+    reconnectTimer=null;
+    if(conn||!dev||!dev.gatt||manualDisconnect){reconnectTries=0;return}
+    attachToDevice().then(function(){
+      reconnectTries=0;
+      log('自动重连成功');
+    }).catch(function(e){
+      log('自动重连失败: '+(e&&e.message?e.message:e));
+      scheduleReconnect();
+    });
+  },delay);
 }
 
 function setupRxTx(){
@@ -296,7 +404,12 @@ function setupRxTx(){
     .then(()=>{rxChar.addEventListener('characteristicvaluechanged',e=>onRx(e.target.value))})
 }
 
-function doDisconnect(){if(dev&&dev.gatt.connected)dev.gatt.disconnect();conn=false;onDisconnect()}
+function doDisconnect(){
+  cancelReconnect();
+  manualDisconnect=true;   // 用户主动断开:gattserverdisconnected 事件与 onDisconnect 都不再自动重连
+  if(dev&&dev.gatt.connected)dev.gatt.disconnect();
+  conn=false;onDisconnect();
+}
 
 // ==================== Commands ====================
 // Effective payload cap = MTU - 3 (ATT header).  Falls back to 20 (default
@@ -312,6 +425,7 @@ function logPayloadMax(tag){
   log((tag?tag+': ':'')+'payload max = '+blePayloadMax+' bytes'+note);
 }
 function pollPayloadMax(retries,delayMs){
+  if(!wrChar)return;   // 断连后停止轮询/打印,不再"无限刷新"
   refreshPayloadMax();
   logPayloadMax('连接');
   if(blePayloadMax>20){
@@ -325,14 +439,24 @@ function pollPayloadMax(retries,delayMs){
   setTimeout(function(){pollPayloadMax(retries-1,delayMs)},delayMs);
 }
 
-async function sendCmd(data){
+// 连接断开关联错误:BLE 一断开就抛它。上传循环抛到它立刻中止 —— 而不是像
+// 原来那样:sendCmd 断连时只打印一句"未连接"然后假装成功返回,让上传循环把整
+// 个固件"空写"完再干等 3×8s CRC 超时,期间疯狂刷屏。
+function DiscError(msg){var e=new Error(msg||'连接已断开，操作已中止');e.isDisc=true;return e}
+function isDisc(e){return !!(e&&e.isDisc)}
+// HTML 里 onclick 直接调 sendCmd 的调试按钮走这里:未连接提示一次即可,不抛未捕获异常。
+function uiCmd(data){
   if(!wrChar){log('未连接');return}
+  sendCmd(data).catch(function(e){log(isDisc(e)?'未连接：命令未发送':'命令失败: '+(e&&e.message?e.message:e))})
+}
+async function sendCmd(data){
+  if(!wrChar)throw DiscError();
   await wrChar.writeValue(data)
 }
 async function sendCmdFast(data){
   // write-without-response: fast, and `await` waits for the link-layer
   // enqueue so back-to-back calls are throttled by the controller (no drops).
-  if(!wrChar){log('未连接');return}
+  if(!wrChar)throw DiscError();
   if(typeof wrChar.writeValueWithoutResponse==='function'){
     await wrChar.writeValueWithoutResponse(data)
   }else{
@@ -340,6 +464,26 @@ async function sendCmdFast(data){
     // 每次一个 RTT，慢但兼容；窗口式上传仍靠固件 fwWritten 应答限速。
     await wrChar.writeValue(data)
     await waitMs(3)
+  }
+}
+// OTA goes through the WRITE (with-response) characteristic, so Windows-Chrome
+// Web Bluetooth can throw a transient "GATT operation failed for unknown
+// reason" on a single write.  Retry ONLY device-idempotent commands here
+// (erase/bank/crc re-send the same effect); a dropped data-append is handled
+// separately by the whole-upload re-sync (next chunk size re-erases and
+// re-uploads) so a retry can never double-append into the 256 B bank buffer.
+async function sendOta(data,label){
+  var tries=4, delay=150;
+  for(var t=0;t<tries;t++){
+    if(!wrChar)throw DiscError();
+    try{ await sendCmd(data); return; }
+    catch(e){
+      // 已经断开:不再空转重试,立即抛出让整次刷写停止(见 fwSend 的 aborted 处理)
+      if(isDisc(e))throw e;
+      if(t===tries-1){ throw e; }
+      log('OTA '+label+' 重试'+(t+1)+' ('+(e&&e.message?e.message:e)+')');
+      await waitMs(delay*(t+1));
+    }
   }
 }
 async function rxTx(data){
@@ -358,6 +502,8 @@ function onNotify(data){
   var b=notifyBytes(data);
   // OTA 大块写能力探测应答(0x05 读回缓冲):一次性 waiter,优先于其他分发
   if(otaProbeCB!==null){var pr=otaProbeCB,rs=otaProbeResolve;otaProbeCB=null;otaProbeResolve=null;if(rs)rs(b);return}
+  // OTA case 6 暂存区 CRC 应答:设备通知 [0x07][hi][lo]
+  if(otaCrcCB!==null && b.length>=3 && b[0]==0x07){var cr=otaCrcCB,cs=otaCrcResolve;otaCrcCB=null;otaCrcResolve=null;if(cs)cs(((b[1]<<8)|b[2])&0xffff);return}
   if(b.length>0&&b[0]==0x19){statusNotify(b);return}
   if(b.length>0&&b[0]==0x33){lockImgNotify(b);return}
   if(b.length>0&&b[0]==0x34){settingsNotify(b);return}
@@ -372,7 +518,7 @@ function onNotify(data){
   try{var t=new TextDecoder().decode(b);if(/^[ -~\n\r\t]*$/.test(t))log('[OTA] '+t.trim())}catch(e){}
 }
 
-var ebookCB=null, ebookResolve=null;
+var ebookCB=null, ebookResolve=null, ebookReject=null;
 var entries=[], entryCount=0;
 var listEntryTimer=null;
 var bookWaitSlot=-1, bookFrag=null;
@@ -384,9 +530,10 @@ function onRx(data){
 
 function ebookWait(cmd,ms){
   return new Promise((resolve,reject)=>{
-    ebookCB=cmd;ebookResolve=resolve;setTimeout(()=>{
+    ebookCB=cmd;ebookResolve=resolve;ebookReject=reject;
+    setTimeout(()=>{
       if(ebookCB==cmd){
-        ebookCB=null;
+        ebookCB=null;ebookResolve=null;ebookReject=null;
         if(cmd==0x14&&listEntryTimer){clearTimeout(listEntryTimer);listEntryTimer=null}
         reject(new Error('timeout'))
       }
@@ -397,15 +544,15 @@ function ebookWait(cmd,ms){
 function ebookWaitBookSlot(idx,ms){
   return new Promise((resolve,reject)=>{
     bookWaitSlot=idx;bookFrag=null;
-    ebookCB=0x15;ebookResolve=resolve;
+    ebookCB=0x15;ebookResolve=resolve;ebookReject=reject;
     var t=setTimeout(()=>{
       if(ebookCB===0x15&&bookWaitSlot===idx){
-        ebookCB=null;bookWaitSlot=-1;bookFrag=null;
+        ebookCB=null;bookWaitSlot=-1;bookFrag=null;ebookResolve=null;ebookReject=null;
         reject(new Error('timeout'))
       }
     },ms);
     var done=resolve;
-    ebookResolve=function(v){clearTimeout(t);done(v)};
+    ebookResolve=function(v){clearTimeout(t);ebookReject=null;done(v)};
   })
 }
 
@@ -556,6 +703,14 @@ function otaProbeRead(timeout){
   return new Promise(function(resolve){
     otaProbeCB=1;otaProbeResolve=resolve;
     setTimeout(function(){if(otaProbeCB!==null){otaProbeCB=null;var r=otaProbeResolve;otaProbeResolve=null;if(r)r(null)}},timeout);
+  });
+}
+var otaCrcCB=null,otaCrcResolve=null;  // OTA case 6 暂存区 CRC 的一次性 waiter
+function otaCrcCheck(timeout){
+  timeout=timeout||8000;
+  return new Promise(function(resolve){
+    otaCrcCB=1;otaCrcResolve=resolve;
+    setTimeout(function(){if(otaCrcCB!==null){otaCrcCB=null;var r=otaCrcResolve;otaCrcResolve=null;if(r)r(-1)}},timeout);
   });
 }
 function ebookNotify(b){
@@ -731,7 +886,8 @@ function imgDebugCompare(){
 
 // ==================== Settings (BLE on/off, sleep timeout, version) ====================
 function loadSettings(){
-  try{sendCmd(new Uint8Array([0x34]))}catch(e){}
+  if(!wrChar)return;   // 断连后不发送
+  sendCmd(new Uint8Array([0x34])).catch(function(){})
 }
 function settingsNotify(b){
   if(b.length<6)return;
@@ -805,6 +961,7 @@ async function streamUpload(opcode,data,bar,onStat){
   var sent=0;                 // bytes handed to the controller
   fwWritten=0;                // reset cumulative ack before streaming
   while(sent<total){
+    if(!wrChar)throw DiscError();   // 断连立即中止,不再把剩余数据"空写"完
     // Flow control: if the in-flight window is full, yield until the firmware
     // acks more.  We do NOT abort on a notify stall here: the firmware's
     // per-chunk notify is frequently dropped by the shallow BLE notify queue,
@@ -829,7 +986,10 @@ async function streamUpload(opcode,data,bar,onStat){
   // (nothing follows it to flush the queue), and waiting on it would hang.
   // end()'s ack is the real "everything is written" confirmation.
   var drainDeadline=clock_ms()+1500;
-  while(fwWritten<total && clock_ms()<drainDeadline){await waitMs(UPLOAD_POLL_MS)}
+  while(fwWritten<total && clock_ms()<drainDeadline){
+    if(!wrChar)break;   // 断连后没必要干等到 drain 截止
+    await waitMs(UPLOAD_POLL_MS)
+  }
 }
 
 function clock_ms(){return Date.now()}
@@ -853,7 +1013,7 @@ async function fontUpload(){
     try{var ew18=ebookWait(0x18,5000);await sendCmd(new Uint8Array([0x18]));await ew18;setFontStat('✅ 完成 '+b.length+' B / '+secs+'s')}catch(e){setFontStat('end超时')}
   }catch(e){setFontStat('上传失败: '+(e.message||e));log('fontUpload err: '+e)}
   finally{setBusy(false);bar.style.display='none'}
-  setTimeout(queryStatus,500)
+  setTimeout(function(){if(conn)queryStatus()},500)
 }
 
 // Ask firmware to drop ghost catalog slots (no-op on old firmware).
@@ -882,7 +1042,7 @@ async function gbkFontUpload(){
     }catch(e){setGbkFontStat('end超时')}
   }catch(e){setGbkFontStat('上传失败: '+(e.message||e));log('gbkFontUpload err: '+e)}
   finally{setBusy(false);bar.style.display='none'}
-  setTimeout(queryStatus,500)
+  setTimeout(function(){if(conn)queryStatus()},500)
 }
 
 // ==================== Book upload ====================
@@ -1072,7 +1232,7 @@ async function bookUpload(){
     try{var ew12=ebookWait(0x12,10000);await sendCmd(new Uint8Array([0x12]));await ew12;setBookStat('✅ 完成 '+raw.length+'B / '+secs+'s')}catch(e){setBookStat('end超时')}
   }catch(e){setBookStat('上传失败: '+(e.message||e));log('bookUpload err: '+e)}
   finally{setBusy(false);bar.style.display='none'}
-  setTimeout(bookList,500);setTimeout(queryStatus,1000)
+  setTimeout(function(){if(conn){bookList();queryStatus()}},500)
 }
 
 // ==================== Book list ====================
@@ -1085,6 +1245,7 @@ async function queryBookSlot(idx){
       if(ent&&!ent.absent)return ent;
       if(ent&&ent.absent)return null;
     }catch(e){
+      if(isDisc(e))return null;   // 断连:不再重试
       if(attempt<2)await waitMs(150);
     }
   }
@@ -1113,7 +1274,7 @@ function renderBookTable(){
 async function bookList(){
   if(busy){log('设备忙（传输中），请稍后再刷新列表');return}
   entries=[];entryCount=0;document.getElementById('bookTable').innerHTML='<span class="fade">查询中...</span>';
-  try{var ew14=ebookWait(0x14,8000);await sendCmd(new Uint8Array([0x14]));var cntPkt=await ew14;entryCount=cntPkt[1]}catch(e){document.getElementById('bookTable').innerHTML='<span class="fade">超时</span>';return}
+  try{var ew14=ebookWait(0x14,8000);await sendCmd(new Uint8Array([0x14]));var cntPkt=await ew14;entryCount=cntPkt[1]}catch(e){document.getElementById('bookTable').innerHTML='<span class="fade">'+(isDisc(e)?'未连接':'超时')+'</span>';return}
   for(var idx=0;idx<8;idx++){
     var ent=await queryBookSlot(idx);
     if(ent){entries.push(ent);renderBookTable()}
@@ -1139,8 +1300,8 @@ function updateFlash(){
     '<div class="bar-g" style="margin-top:2px"><div class="bar-f" style="width:'+pct+'%;background:'+c+'"></div></div>';
 }
 
-async function bookOpen(i){if(busy)return;await sendCmd(new Uint8Array([0x20,i]))}
-async function bookDel(i){if(busy)return;if(!confirm('删除书#'+i+'?'))return;await sendCmd(new Uint8Array([0x13,i]));setTimeout(bookList,500)}
+async function bookOpen(i){if(busy)return;if(!wrChar){log('未连接');return}try{await sendCmd(new Uint8Array([0x20,i]))}catch(e){log(isDisc(e)?'未连接：命令未发送':'命令失败: '+(e&&e.message?e.message:e))}}
+async function bookDel(i){if(busy)return;if(!wrChar){log('未连接');return}if(!confirm('删除书#'+i+'?'))return;try{await sendCmd(new Uint8Array([0x13,i]));setTimeout(function(){if(conn)bookList()},500)}catch(e){log(isDisc(e)?'未连接：命令未发送':'命令失败: '+(e&&e.message?e.message:e))}}
 
 // ==================== Lock Image Editor ====================
 var limg=null,lx=0,ly=0,lzoom=1,ldrag=false,ldx=0,ldy=0,lres=null;
@@ -1255,7 +1416,7 @@ async function imgSend(){
   finally{setBusy(false)}
   // Refresh the status badge so the "锁屏图" indicator updates, and re-read
   // the stored image so the preview reflects what is actually on the device.
-  setTimeout(function(){queryStatus();loadLockImg()},400);
+  setTimeout(function(){if(conn){queryStatus();loadLockImg()}},400);
 }
 
 // ==================== Terminal ====================
@@ -1266,25 +1427,33 @@ function termSend(){
   rxTx(data);document.getElementById('termIn').value=''
 }
 
+// ==================== GPIO 控制(0xF8) ====================
+// pin: 1=PB1 2=PC2 3=PC3 (0=全部,仅 act=2 读有效)
+// act: 0=拉低 1=拉高 2=读电平 3=释放为高阻输入。设备经 RxTx 通知回显结果。
+function gpioCtl(pin,act){
+  if(!conn){log('未连接');return}
+  rxTx(new Uint8Array([0xF8,pin,act]))
+}
+
 // ==================== Firmware ====================
 async function fwSend(){
   if(!wrChar){log('未连接');return}
   if(busy){log('设备忙，请等待当前操作完成');return}
-  log('OTA: 原版ATC方案(240B大块写 + 50ms银行延时 + 设备端CRC校验) —— 若看不到此行说明是旧缓存页，请 Ctrl+F5');
+  log('OTA: ATC方案 + case6校验 + 失败自动重传 —— 若看不到此行说明是旧缓存页，请 Ctrl+F5');
+  log('提示:请让设备停留在【书架/书库】页且最近按过键(保持唤醒)。时钟/阅读页会做逐分钟整屏刷新抢占 SPI、或自动锁屏,导致刷入很慢或连不上。1.0xa 固件已修复此问题(OTA 期间不再刷新/不睡),烧完即可任意界面刷。');
   var f=document.getElementById('fwFile').files[0];if(!f)return;
   var b=new Uint8Array(await f.arrayBuffer());
   // Validate: first 4 bytes must be KNL header (4b4e4c54)
   var hexStr=bytesToHex(b);
   if(hexStr.substring(16,24)!='4b4e4c54'){alert('不是合法的Telink固件(.bin)，头部缺少KNL标记');return}
   var ta=document.getElementById('fwCmd');
-  ta.value='固件大小: '+(b.length/1024).toFixed(1)+' KB, 擦除中...';
+  ta.value='固件大小: '+(b.length/1024).toFixed(1)+' KB';
   setBusy(true);
 
   // OTA 大块写能力探测:先发 240B 的 0x03,再经 0x05 读回缓冲偏移 0x20。
   // 若 240B 被完整接收,读回字节为 0xAA;若浏览器实际只接受 20B(静默截断),
   // 0x20 之后的字节为 0。随后 0x01 擦除会 memset 缓冲并复位 ram_position,
-  // 探测数据无残留。原版 ATC 网页就是 240B 大块写 —— Chrome 在 MTU 协商后
-  // 实际接受 ~244B(maxWriteValueLength() 只反映协商前的默认值 20,是假值)。
+  // 探测数据无残留。
   var bigOk=false;
   try{
     await sendCmd(hexToBytes('03'+'aa'.repeat(240)));
@@ -1293,86 +1462,119 @@ async function fwSend(){
     var rb=await pr;
     bigOk=!!(rb&&rb.length>0&&rb[0]===0xaa);
   }catch(e){bigOk=false}
-  log(bigOk?'大块写探测: 240B 完整接收,采用原版 ATC 大块方案(快)':'大块写探测: 浏览器仅支持小块,回退 19B 方案(慢但稳)');
+  log(bigOk?'大块写探测: 240B 完整接收':'大块写探测: 仅小块');
 
-  // Erase firmware area (0x20000..0x40000, in 4KB blocks) —— 与原版 ATC 网页一致
-  var eraseAddr=0x20000;
-  while(eraseAddr<0x40000){
-    var eraseCmd=new Uint8Array([0x01,(eraseAddr>>16)&0xff,(eraseAddr>>8)&0xff,eraseAddr&0xff]);
-    try{await sendCmd(eraseCmd)}catch(e){ta.value='擦除失败';setBusy(false);return}
-    eraseAddr+=0x1000;
-  }
-  ta.value='擦除完成，写入中...';
-
-  ta.value='写入中...';
-  startTime=new Date().getTime();
-  fwSizeComplete=hexStr.length;
-  fwBytesTransmited=0;
-
-  // Send data using the ORIGINAL ATC web page scheme (sendPart/sendFile):
-  //   - each 0x03 write carries 240 bytes (480 hex chars) when big writes are
-  //     supported (device negotiated ATT MTU 247 -> browser accepts ~244B
-  //     writes; maxWriteValueLength()=20 only reflects the pre-negotiation
-  //     default and is a lie after the MTU exchange);
-  //   - one 0x02 bank write per 256B bank;
-  //   - 50ms pause after each bank write (gives the flash time, paces the link).
-  //   Whole image = ~530 writes instead of ~7000 tiny 19B writes -> far fewer
-  //   chances for the link to drop a packet.
-  // 银行大小必须 = 0x100 (256B):设备端 ota.c 的 ramd_to_flash_temp_buffer 只有
-  // 256B,case 3 写入超出即 return 0 丢弃。
-  var bankSize=0x100;  // 256 bytes per bank,匹配设备缓冲区
-  var chunkLen=bigOk?240:19;   // bytes per 0x03 write (原版 ATC 用 240)
-  var partLen=chunkLen*2;      // hex chars per write
-  var pos=0;
-  while(pos<b.length){
-    // Collect up to bankSize bytes for this bank
-    var chunk=b.slice(pos,Math.min(pos+bankSize,b.length));
-    var chunkHex=bytesToHex(chunk);
-
-    // Send data chunks (0x03 + hex data)
-    var dataHex=chunkHex;
-    while(dataHex.length>0){
-      var curLen=Math.min(partLen,dataHex.length);
-      var dataPart=dataHex.substring(0,curLen);
-      dataHex=dataHex.substring(curLen);
-      try{await sendCmd(hexToBytes('03'+dataPart))}catch(e){ta.value='写入失败';setBusy(false);return}
-      fwBytesTransmited+=curLen;
-    }
-
-    // Write bank to flash at current address
-    var bankAddr=0x20000+pos;
-    var addrHex=decimalToHex(bankAddr,8);
-    try{await sendCmd(hexToBytes('02'+addrHex))}catch(e){ta.value='写入失败';setBusy(false);return}
-    await waitMs(50);   // 与原版 ATC 一致:每银行写入后延时 50ms
-    pos+=bankSize;
-    var pct=(pos/b.length*100).toFixed(1);
-    var elapsed=((new Date().getTime()-startTime)/1000).toFixed(1);
-    ta.value='写入: '+pos+'/'+b.length+' ('+pct+'%) '+elapsed+'s';
-  }
-
-  // 最终刷写:设备端(cmd 7)会重新计算 OTA 暂存区实际校验和并与期望值比对,
-  // 不匹配则拒绝刷写并通知 [0x08](设备保持存活,不会把残缺镜像刷入卡死)。
-  // 期望值 = sum(固件字节 + 0xFF 补齐到 0x20000) mod 65536,与设备端一致。
+  // 期望校验和 = sum(固件字节 + 0xFF 补齐到 0x20000) mod 65536, 与设备端一致。
   var expect=0;
   for(var p=0;p<0x20000;p++){ expect += (p<b.length)?b[p]:0xff; }
   expect &= 0xffff;
   var expectHex=('000'+expect.toString(16)).slice(-4);
-  ta.value='校验: 期望 0x'+expectHex+' ...';
-  otaFailFlag=0;otaDevCRC=-1;otaFlashStarted=0;
-  var cmd7err=false;
-  try{await doFinalFlash(expectHex)}catch(e){cmd7err=true;log('OTA 最终刷写命令发送异常（若此前设备已确认刷写，则这是设备重启导致的正常现象）: '+e)}
-  // 三种明确结果:0x08=拒绝;0x09 或 cmd7 发送失败(设备已重启)= 成功;都无=命令未送达。
-  await waitMs(2500);
-  setBusy(false);
-  if(otaFailFlag){
-    if(otaDevCRC>=0)
-      ta.value='❌ 校验失败：设备端实际校验和 0x'+('000'+otaDevCRC.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，上传数据不完整，未刷写';
-    else
-      ta.value='❌ 校验失败：设备拒绝刷写（上传不完整），未刷写';
-  }else if(otaFlashStarted || cmd7err){
-    ta.value='✅ 设备已确认刷写并重启（若未收到 0x09，则 cmd7 发送失败 = 设备已重启）。约 5 秒后可重新连接，确认版本 FW 1.0X';
+  var devCrc=-1;
+
+  // 擦除 OTA 暂存区 (0x20000..0x40000)
+  // 关键:命令必须是 5 字节 [0x01][4字节BE地址]。设备端 custom_otaWrite 只在
+  // data_len>=5 时解析地址;4 字节命令地址不解析(恒 0)-> 擦除被静默跳过,
+  // 残留数据越积越多 -> 校验永远是"设备 CRC 更高"的确定性失败。
+  async function doErase(){
+    var eraseAddr=0x20000;
+    while(eraseAddr<0x40000){
+      var eraseCmd=hexToBytes('01'+decimalToHex(eraseAddr,8));
+      await sendOta(eraseCmd,'erase');      // 幂等,可重试
+      await waitMs(10);                     // 留给设备完成 flash_erase_sector
+      eraseAddr+=0x1000;
+    }
+  }
+
+  // 用指定块大小上传:每 0x03 写 chunkLen 字节,每 256B 银行发 0x02 (0x02 后 50ms)。
+  async function doUpload(chunkLen){
+    startTime=new Date().getTime();
+    var bankSize=0x100, partLen=chunkLen*2, pos=0;
+    while(pos<b.length){
+      var chunk=b.slice(pos,Math.min(pos+bankSize,b.length));
+      var chunkHex=bytesToHex(chunk);
+      var dataHex=chunkHex;
+      while(dataHex.length>0){
+        var curLen=Math.min(partLen,dataHex.length);
+        var dataPart=dataHex.substring(0,curLen);
+        dataHex=dataHex.substring(curLen);
+        await sendOta(hexToBytes('03'+dataPart),'data');   // 固件丢弃超界块,重复写入安全
+      }
+      var bankAddr=0x20000+pos;
+      await sendOta(hexToBytes('02'+decimalToHex(bankAddr,8)),'bank');  // 幂等,可重试
+      await waitMs(50);
+      pos+=bankSize;
+      var pct=(pos/b.length*100).toFixed(1);
+      var elapsed=((new Date().getTime()-startTime)/1000).toFixed(1);
+      ta.value='写入'+chunkLen+'B: '+pos+'/'+b.length+' ('+pct+'%) '+elapsed+'s';
+    }
+  }
+
+  // 尝试多种块大小,每次完整重传;块大小不同,丢字节的位置通常不同 —— 重传
+  // 大概率能避开上一次的损坏点。每次上传后用 case 6 让设备算暂存区 CRC 比对。
+  var chunkSizes = bigOk ? [240,128,64] : [19];
+  var ok=false, aborted=false;   // aborted=连接断开:立即停止,不做任何重传/CRC
+  for(var attempt=0; attempt<chunkSizes.length && !aborted; attempt++){
+    var chunkLen=chunkSizes[attempt];
+    ta.value='第'+(attempt+1)+'/'+chunkSizes.length+'次: 擦除+写入'+chunkLen+'B...';
+    var dataErr=null;
+    try{
+      await doErase();
+      await doUpload(chunkLen);
+    }catch(e){
+      dataErr=e;
+      if(isDisc(e)){
+        aborted=true;
+        log('⛔ 连接已断开，刷写中止（固件未写入）。重新连接后重试');
+      }else{
+        log('第'+(attempt+1)+'次('+chunkLen+'B)写入中断: '+(e&&e.message?e.message:e));
+      }
+    }
+    if(aborted) break;
+    if(dataErr) continue;   // 数据不完整:下一块大小整体重擦+重传,不做校验
+    // case 6: 设备算暂存区实际 CRC
+    ta.value='第'+(attempt+1)+'次: 校验...';
+    var cp=otaCrcCheck(8000);
+    otaFailFlag=0;
+    try{ await sendCmd(hexToBytes('06')); }
+    catch(e){
+      if(isDisc(e)){aborted=true;log('⛔ 连接已断开，刷写中止（固件未写入）。重新连接后重试');break}
+      log('CRC 命令失败: '+(e&&e.message?e.message:e));
+    }
+    devCrc=await cp;
+    if(devCrc===expect){
+      ok=true;
+      ta.value='校验通过(设备 0x'+('000'+devCrc.toString(16)).slice(-4)+'), 刷写中...';
+      log('OTA 校验通过: 设备 0x'+('000'+devCrc.toString(16)).slice(-4));
+      break;
+    }else{
+      log('第'+(attempt+1)+'次校验失败: 设备 0x'+('000'+devCrc.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，重传');
+    }
+  }
+
+  if(ok){
+    otaFailFlag=0;otaDevCRC=-1;otaFlashStarted=0;
+    var cmd7err=false;
+    try{await doFinalFlash(expectHex)}catch(e){cmd7err=true;log('OTA 最终刷写命令发送异常（若此前设备已确认刷写，则这是设备重启导致的正常现象）: '+e)}
+    await waitMs(2500);
+    setBusy(false);
+    if(otaFailFlag){
+      if(otaDevCRC>=0)
+        ta.value='❌ 校验失败：设备端实际校验和 0x'+('000'+otaDevCRC.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，未刷写';
+      else
+        ta.value='❌ 校验失败：设备拒绝刷写（上传不完整），未刷写';
+    }else if(otaFlashStarted || cmd7err){
+      ta.value='✅ 设备已确认刷写并重启。约 5 秒后可重新连接，确认版本 FW 1.0xa';
+    }else{
+      ta.value='⚠ 未收到设备确认：刷写命令可能未送达，请重试';
+    }
   }else{
-    ta.value='⚠ 未收到设备确认：刷写命令可能未送达，请重试';
+    setBusy(false);
+    if(aborted)
+      ta.value='❌ 连接已断开，刷写已中止（固件未写入）。重新连接后点「刷固件」重试';
+    else if(devCrc<0)
+      ta.value='❌ OTA 写入多次被 BLE 中断，未能完整传输。请重试一次（已对幂等命令重试、对数据块自动换大小重传）。若仍失败请改用 UART 烧录器';
+    else
+      ta.value='❌ 多次重传后校验仍失败：设备 0x'+('000'+devCrc.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，未刷写。若仍失败请改用 UART 烧录器';
   }
 }
 

@@ -17,5 +17,7 @@ int otaWritePre(void *p);
 void ble_set_connection_speed(uint16_t speed);
 void ble_log(const char *msg);
 void ble_set_advertising(uint8_t on);
+void ble_adv_slow_for_lock(void);   // 锁屏:广播保留,间隔拉长到 2s(深睡省电)
+void ble_adv_restore_fast(void);    // 解锁:还原 1s 广播间隔
 void ble_link_maintenance_tick(void);
 uint16_t ble_get_effective_mtu(void);

@@ -16,6 +16,10 @@
 #include "flash.h"
 #include "epd_ble_service.h"
 #include "ebook.h"
+#include "sleep_log.h"
+
+// 在 app.c 定义:BLE 数据活动回调,OTA/上传期间保持唤醒,防止自动锁屏深睡。
+extern void app_mark_ble_activity(void);
 
 RAM uint8_t ble_connected = 0;
 RAM uint8_t ota_started = 0;
@@ -160,18 +164,41 @@ void ble_set_advertising(uint8_t on)
 	bls_ll_setAdvEnable(on ? 1 : 0);
 }
 
+/* 锁屏深睡(方案B'):广播不关,间隔从 1s 拉长到 2s → 栈在广播间隔间进入
+ * DEEPSLEEP_RETENTION_ADV(掩码已有;retention 阈值 95ms 远小于 2s),
+ * 整机 ~5µA;手机扫描最多 ~2-4s 即可发现设备。解锁用 ble_adv_restore_fast()
+ * 还原 1s 间隔。 */
+void ble_adv_slow_for_lock(void)
+{
+	bls_ll_setAdvEnable(0);
+	bls_ll_setAdvParam(3200, 3250, ADV_TYPE_CONNECTABLE_UNDIRECTED, OWN_ADDRESS_PUBLIC, 0, NULL, BLT_ENABLE_ADV_ALL, ADV_FP_NONE);
+	bls_ll_setAdvEnable(1);
+}
+
+void ble_adv_restore_fast(void)
+{
+	bls_ll_setAdvEnable(0);
+	bls_ll_setAdvParam(ADVERTISING_INTERVAL, ADVERTISING_INTERVAL + 50, ADV_TYPE_CONNECTABLE_UNDIRECTED, OWN_ADDRESS_PUBLIC, 0, NULL, BLT_ENABLE_ADV_ALL, ADV_FP_NONE);
+	bls_ll_setAdvEnable(1);
+}
+
 _attribute_ram_code_ void ble_disconnect_callback(uint8_t e, uint8_t *p, int n)
 {
 	ble_connected = 0;
 	ota_started = 0;
 	ble_reset_link_state();
 	ebook_ble_reset_upload();
+	/* 休眠诊断:锁屏后深睡只留 pad 唤醒源,连接事件失联 -> 检测超时断连。
+	 * 记录 reason 便于区分(0x08=链路超时, 0x13=对端断开, 0x16=本端终止)。 */
+	slp_log_disc((p && n > 0) ? p[0] : 0);
 	printf("BLE disconnected\r\n");
 }
 
 _attribute_ram_code_ void user_set_rf_power(uint8_t e, uint8_t *p, int n)
 {
 	rf_set_power_level_index(RF_POWER_P3p01dBm);
+	// 休眠诊断:每次从 suspend 醒来都会走到这里,顺手标记一次 suspend 唤醒。
+	slp_log_suspend_exit();
 }
 
 _attribute_ram_code_ void ble_connect_callback(uint8_t e, uint8_t *p, int n)
@@ -192,7 +219,10 @@ _attribute_ram_code_ void ble_set_connection_speed(uint16_t speed)
 _attribute_ram_code_ int otaWritePre(void *p)
 {
 	rf_packet_att_data_t *req = (rf_packet_att_data_t *)p;
-	if (req->dat[0] >=0x10 && req->dat[0] <=0x44)
+	/* 任何发往 0x331f 特性的写都算 BLE 数据活动:重置空闲计时/保持窗口,防止
+	 * OTA/上传途中设备被"空闲超时"自动锁屏而进入深睡,中断刷写。 */
+	app_mark_ble_activity();
+	if (req->dat[0] >=0x10 && req->dat[0] <=0x49)
 		return epd_ble_handle_write(p);
 	if (ota_started == 0)
 	{
@@ -206,6 +236,7 @@ _attribute_ram_code_ int RxTxWrite(void *p)
 {
 	uint8_t dbg[3] = {'R', 'X', 0};
 	rf_packet_att_data_t *req = (rf_packet_att_data_t*)p;
+	app_mark_ble_activity();                 // 终端命令也算 BLE 活动
 	dbg[2] = req->dat[0];
 	bls_att_pushNotifyData(OTA_CMD_OUT_DP_H, dbg, 3);
 	cmd_parser(p);
@@ -269,6 +300,9 @@ void init_ble(void)
 	bls_app_registerEventCallback(BLT_EV_FLAG_SUSPEND_EXIT, &user_set_rf_power);
 	bls_app_registerEventCallback(BLT_EV_FLAG_CONNECT, &ble_connect_callback);
 	bls_app_registerEventCallback(BLT_EV_FLAG_TERMINATE, &ble_disconnect_callback);
+	// 休眠诊断:栈每次真正入睡都带"即将进入的睡眠模式"调此回调(0x00=suspend,
+	// 0x07=deep retention 32k)。回调只写一个 RAM 字节,可高频触发。
+	bls_app_registerEventCallback(BLT_EV_FLAG_SUSPEND_ENTER, &slp_log_suspend_enter);
 
 	blc_ll_initPowerManagement_module();
 	bls_pm_setSuspendMask(SUSPEND_ADV | DEEPSLEEP_RETENTION_ADV | SUSPEND_CONN | DEEPSLEEP_RETENTION_CONN);

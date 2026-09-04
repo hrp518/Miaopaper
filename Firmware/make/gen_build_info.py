@@ -11,7 +11,7 @@ import sys, os, datetime
 FW_MAJOR = 1
 FW_MINOR = 0
 FW_PATCH = 0
-FW_VERSION_STR = "1.0X"
+FW_VERSION_STR = "1.0xa"
 
 def main():
     if len(sys.argv) < 2:

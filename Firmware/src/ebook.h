@@ -150,6 +150,7 @@ uint8_t ebook_get_book_count(void);
 void ebook_enter_select(void);
 void ebook_handle_long_right(void);
 void ebook_handle_lock(void);
+void ebook_render_lock_hint(void);
 void ebook_handle_unlock(void);
 void ebook_select_confirm(void);
 void ebook_select_up(void);

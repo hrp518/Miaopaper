@@ -30,7 +30,7 @@ int epd_ble_handle_write(void *p)
 
 	// Debug marker for non-bulk commands only.  Per-packet 'P' notify on 0x11/0x17
 	// steals half the air time at MTU 20 and can cut upload throughput by ~40%.
-	if (payload[0] >= 0x10 && payload[0] <= 0x44 &&
+	if (payload[0] >= 0x10 && payload[0] <= 0x49 &&
 	    payload[0] != 0x11 && payload[0] != 0x17)
 	{
 		uint8_t dbg[3] = {'P', payload[0], (uint8_t)(payload_len & 0xff)};
@@ -79,7 +79,7 @@ int epd_ble_handle_write(void *p)
 		epd_display_tiff(epd_buffer, byte_pos);
 		return 0;
 	default:
-		if (payload[0] >= 0x10 && payload[0] <= 0x44)
+		if (payload[0] >= 0x10 && payload[0] <= 0x49)
 			return ebook_ble_handle_command(payload, payload_len);
 		return 0;
 	}

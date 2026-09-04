@@ -10,6 +10,7 @@
 #include "battery.h"
 #include "ble.h"
 #include "flash.h"
+#include "ext_flash.h"
 #include "ota.h"
 #include "epd.h"
 #include "etime.h"
@@ -20,7 +21,9 @@
 #include "buttons.h"
 #include "charge_state.h"
 #include "battery_scan.h"
+#include "sleep_log.h"
 #include "drivers/8258/watchdog.h"
+#include "drivers/8258/pm.h"
 
 // 硬件看门狗超时(ms):须大于最长阻塞操作 —— EPD 全刷 WaitBusy 3000ms +
 // 开销 ≈3.2s,单次上传块 <0.5s。设 10s 留足裕量,卡死时最多 10s 自动复位。
@@ -32,6 +35,38 @@ RAM uint8_t battery_level;
 RAM uint16_t battery_mv;
 RAM int16_t temperature;
 RAM uint32_t last_activity_tick;  // reset on user action; used for sleep delay
+// 深睡 pad 唤醒观察:lock_wake_pending 由 user_init_deepRetn 置位;唤醒后设备
+// 逗留 LOCK_HOLD_MS(期间允许双击解锁 + GC 全刷显示 "Double Click to Unlock"),
+// 超时未解锁(单击/毛刺)则重新深睡。用于观察是否毛刺触发唤醒。
+RAM static uint8_t lock_wake_pending = 0;
+RAM static uint32_t lock_hint_tick = 0;
+RAM static uint32_t lock_hold_until = 0;
+#define LOCK_HOLD_MS 3000
+#define DCLK_CONFIRM_MS 450   // 稍大于双击窗口(LWBTN 350ms)
+
+// BLE 数据活动保持:任何发往 OTA 特性(0x331f)的写(书籍/字库/OTA/命令)都会
+// 重置该计时器,睡眠决策据此保持唤醒 —— 修复 OTA/上传中途被"空闲超时自动锁屏"
+// 打断(设备在刷写途中进入深睡)的问题。锁屏分支不读 idle 计时,所以单独用
+// last_ble_write_tick + 保持窗口来强制不睡。
+#define BLE_WRITE_HOLD_MS 4000
+RAM uint32_t last_ble_write_tick = 0;
+
+// BLE 数据活动回调(由 otaWritePre / 其它写处理函数调用):重置空闲计时,让正在
+// 上传/OTA 的设备永不被"空闲超时"误判为无人使用而自动锁屏+深睡。
+_attribute_ram_code_ void app_mark_ble_activity(void)
+{
+    last_activity_tick = clock_time();
+    last_ble_write_tick = clock_time();
+}
+
+// 锁屏下单点击 F:先挂一个"确认非双击"计时(稍大于双击窗口),期间若随后双击
+// 则解锁并取消;超时未双击(确认为单点击)且仍锁屏,才 GC 全刷显示
+// "Double Click to Unlock"。同时保持唤醒,避免提示还没显示设备就再睡。
+void app_lock_observe(void)
+{
+    lock_hint_tick = clock_time() + (uint32_t)DCLK_CONFIRM_MS * CLOCK_16M_SYS_TIMER_CLK_1MS;
+    lock_hold_until = clock_time() + (uint32_t)LOCK_HOLD_MS * CLOCK_16M_SYS_TIMER_CLK_1MS;
+}
 
 // 休眠决策诊断:每 10 秒在 BLE 日志里上报"为何未休眠",便于定位
 // "阅读界面不进休眠"问题(mode/conn/upload/idle/超时/EPD/按键)。
@@ -77,13 +112,33 @@ _attribute_ram_code_ void user_init_normal(void)
     // 深度保留睡眠期间 16M 计时器冻结,不会误复位;唤醒后 main_loop 喂狗。
     wd_set_interval_ms(WD_TIMEOUT_MS, CLOCK_16M_SYS_TIMER_CLK_1MS);
     wd_start();
+
+    // 冷启动记录(含 pad 唤醒标志/唤醒源):冷启动本身 = full deep sleep、
+    // 断电或看门狗复位 —— retention 唤醒不会走到这里。
+    slp_log_boot();
 }
 
 _attribute_ram_code_ void user_init_deepRetn(void)
 { // after sleep this will get executed
     blc_ll_initBasicMCU();
     rf_set_power_level_index(RF_POWER_P3p01dBm);
+    /* retention 唤醒统一走库的睡醒对账(清 bltPm 标志 + 补写 LL 寄存器)。
+     * 锁屏深睡由"方案B':广播保留+间隔拉长"实现(ebook_handle_lock),栈自己
+     * 进 retention,无需任何栈外重建。 */
     blc_ll_recoverDeepRetention();
+    /* 关键:广播 retention tick(锁屏 B' 下每 2s 一次)也走这里,但只有
+     * pad 唤醒才是用户按键。若无条件置 lock_wake_pending,每个广播 tick 都会
+     * 触发"双击解锁观察"(逗留 3s + 450ms 后 GC 全刷提示),设备永远醒着反复
+     * 刷 "Double Click to Unlock" —— B' 实测踩坑。 */
+    if (pm_is_deepPadWakeup()) {
+        lock_wake_pending = 1;
+        // 休眠诊断:只对真按键(pad)唤醒做记录标记(不做 IO)。
+        slp_log_arm_wake_capture();
+    } else {
+        // 非 pad 的 retention 唤醒(广播 tick 等):记 60s 节流心跳,证明
+        // 栈确实在 retention 里循环(每 2s 广播 tick 都会重跑这里)。
+        slp_log_arm_retick();
+    }
 }
 
 _attribute_ram_code_ void main_loop(void)
@@ -91,6 +146,12 @@ _attribute_ram_code_ void main_loop(void)
     wd_clear();  // 喂看门狗(一次寄存器写);深度保留睡眠期间计数冻结,唤醒后立即续喂
     blt_sdk_main_loop();
     ble_link_maintenance_tick();
+    // 休眠诊断:deep retention 唤醒后的首个 main_loop,补写 WAKE 记录(内部有
+    // 待处理标志 + pad/连接 状态门控,空闲时只是一次 RAM 读)。
+    // 休眠诊断:唤醒记录(R/W)必须在 handler_time 之后 —— 它内部用
+    // current_unix_time 节流,而唤醒首轮该值还是睡前旧值(未补算),提前调用
+    // 会让节流误判"不足 60s"吞掉记录(实测 R 只出第一条)。
+    slp_log_wake_capture();
     handler_time();
     uint8_t flag = 0;
     if (time_reached_period(Timer_CH_1, 30))
@@ -118,16 +179,33 @@ _attribute_ram_code_ void main_loop(void)
         // progress: the external SPI flash shares CLK/MOSI with the EPD, and a
         // refresh mid-upload sets epd_update_state=1 which makes every
         // ext_flash_is_safe() check fail -> upload chunks silently dropped.
-        if (!ebook_ble_is_uploading())
+        if (!ebook_ble_is_uploading() && !ble_get_ota_started())
             epd_update(get_time(), battery_mv, temperature);
     } else if (eb_mode == EB_MODE_LOCK) {
         ebook_button_tick();  // only scan buttons, no screen update
+        /* 深睡 pad 唤醒观察:唤醒后若未在逗留期内双击解锁(单击/毛刺),GC 全刷
+         * 显示 "Double Click to Unlock",便于观察是否毛刺触发唤醒。锁屏电源管理
+         * 分支负责设置 lock_hint_tick,这里到点只负责渲染。 */
+        if (lock_hint_tick && (int32_t)(clock_time() - lock_hint_tick) >= 0 &&
+            eb_mode == EB_MODE_LOCK) {
+            lock_hint_tick = 0;
+            ebook_render_lock_hint();
+        }
     } else {
         ebook_button_tick();
+        // 离开锁屏:取消待显示的唤醒提示,避免下次锁屏误触发
+        lock_hint_tick = 0;
+        lock_wake_pending = 0;
+        lock_hold_until = 0;
     }
 
     // Check if there's a pending render (e.g., mode change during EPD busy)
     ebook_check_pending_render();
+
+    // Button/charge level monitor (BLE 0x46) — internal 50ms throttle.
+    btn_level_monitor_tick();
+    // Free/unused GPIO change monitor (BLE 0x48) — internal 50ms throttle.
+    free_gpio_monitor_tick();
 
     // Every 3 seconds, send debug via OTA notify (confirmed working channel).
     // Suppressed during active book/font upload to avoid interfering with
@@ -175,31 +253,69 @@ _attribute_ram_code_ void main_loop(void)
     {
         uint32_t idle_ticks = (uint32_t)(clock_time() - last_activity_tick);
         uint8_t  allow_sleep;
+        /* BLE 数据活动保持:最近收到 BLE 写(OTA/书籍/字库/命令)则强制不睡 ——
+         * 即使锁屏分支(不读 idle 计时)也会被这条覆盖,确保刷写途中不深睡。 */
+        uint8_t ble_hold = (int32_t)(clock_time() - last_ble_write_tick) <
+                           (int32_t)(BLE_WRITE_HOLD_MS * CLOCK_16M_SYS_TIMER_CLK_1MS);
         /* Idle timeout comes from the persistent settings (see flash.h /
          * app_config.h g_sleep_timeout_s). Default index 2 = 60 s. */
         uint16_t timeout_s = g_sleep_timeout_s[settings.sleep_timeout_idx];
 
         if (eb_mode == EB_MODE_LOCK) {
-            /* 锁屏轮询唤醒:锁屏时广播已停止(ebook_handle_lock 里关掉),
-             * 唤醒不能再靠广播事件 —— 这里显式挂一个 32k 应用唤醒定时器,
-             * 每 LOCK_POLL_MS 醒来一次轮询按钮/保持时钟,与 BLE 状态彻底
-             * 解耦(即使 BLE 被用户关掉,锁屏也绝不会睡死)。每一轮都重新
-             * 武装,下一次 blt_sdk_main_loop 的睡眠就会以它为唤醒源。 */
-            bls_pm_setAppWakeupLowPower(
-                clock_time() + (uint32_t)LOCK_POLL_MS * CLOCK_16M_SYS_TIMER_CLK_1MS, 1);
-
-            /* Locked: sleep only when the EPD is idle and no button is held.
-             * While a button is held we keep SUSPEND_DISABLE so the 10 ms
-             * button scan can process the press (long-press F -> unlock).
-             * The sleep itself is handed to the BLE stack (timer-driven
-             * deep-retention): the MCU sleeps between poll wakes and keeps
-             * advertising OFF while locked.  No GPIO pad wake-ups are armed --
-             * the analog pulls die in deep retention and the floating pins
-             * would fire spurious wakes (the old self-wake loop). */
+            /* 真深睡 GPIO 唤醒:锁屏后 MCU 深度保留睡眠,按 F/L/R(active-low)
+             * 拉低引脚 -> cpu_set_gpio_wakeup(Level_Low) 触发 pad 唤醒,不做 1s
+             * 轮询。上拉(1M)由 btn_reconfig_gpio 设置并保留(模拟寄存器在深睡
+             * 不清除,见 SDK gpio_init(anaRes_init_en=0))。唤醒后 lwbtn 处理
+             * 按键(单/长按 F -> ebook_handle_unlock)。 */
             uint8_t held = !gpio_read(BTN_FRONT_PIN) ||
                            !gpio_read(BTN_LEFT_PIN)  ||
                            !gpio_read(BTN_RIGHT_PIN);
-            allow_sleep = !held && !epd_update_state;
+            // 三个按钮都使能低电平 pad 唤醒
+            cpu_set_gpio_wakeup(BTN_FRONT_PIN, Level_Low, 1);
+            cpu_set_gpio_wakeup(BTN_LEFT_PIN,  Level_Low, 1);
+            cpu_set_gpio_wakeup(BTN_RIGHT_PIN, Level_Low, 1);
+            // 数据手册 2.7.2:深睡 IO 唤醒的 afe 寄存器(确保 SDK 驱动没漏设,
+            // 尤其 afe_0x26[3]=1 的 16us 抗抖滤波,防止按钮脚毛刺引发乱唤醒):
+            //   afe_0x26[4]=IO唤醒使能, afe_0x26[3]=16us filter
+            //   afe_0x28[4]=PB4(F)使能, afe_0x29[0][4]=PC0(R)/PC4(L)使能
+            //   afe_0x22[4]=PB4极性(0=低电平), afe_0x23[0][4]=PC0/PC4极性
+            {
+                unsigned char wk = analog_read(0x26);
+                wk |= 0x10;   // [4] IO(pad) 唤醒使能
+                wk |= 0x08;   // [3] 16us 抗抖滤波
+                analog_write(0x26, wk);
+                analog_write(0x28, analog_read(0x28) | 0x10);            // PB4(F)
+                analog_write(0x29, analog_read(0x29) | 0x01 | 0x10);     // PC0(R) + PC4(L)
+                analog_write(0x22, analog_read(0x22) & ~0x10);           // PB4 极性=低
+                analog_write(0x23, analog_read(0x23) & ~(0x01 | 0x10));  // PC0/PC4 极性=低
+            }
+            /* 唤醒源 = pad + timer(两个位都必须有 —— "有时候咋按都不开"的
+             * 根因修复):timer 供栈的 2s 广播 tick 在 retention 中自醒;pad 供
+             * 按键秒醒。历史踩坑:旧代码只给 PAD(剥掉 timer → 锁屏即断连);
+             * 改方案A时整行删除(只剩库默认 timer → 深睡中按键完全无效)。 */
+            bls_pm_setWakeupSource(PM_WAKEUP_PAD | PM_WAKEUP_TIMER);
+            /* 方案A(唯一路径):锁屏广播保持开启(见 ebook_handle_lock)→ 栈在
+             * 1s 广播间隔间走 retention(掩码 DEEPSLEEP_RETENTION_ADV),~5-10µA
+             * 且手机可随时连。按钮 pad 唤醒寄存器(cpu_set_gpio_wakeup + afe
+             * 0x22/0x23/0x26/0x28/0x29)照常布好,深睡中按键秒醒。 */
+            /* 深睡 pad 唤醒观察:唤醒后设一个"逗留期",期间允许双击解锁,并且
+             * 若未解锁(单击/毛刺)则 GC 全刷显示 "Double Click to Unlock"。
+             * 关键:毛刺唤醒时通常无按键按住,若不逗留设备会立刻再睡,提示
+             * 来不及显示 —— 所以唤醒后先保持唤醒 LOCK_HOLD_MS。 */
+            if (lock_wake_pending) {
+                lock_wake_pending = 0;
+                lock_hold_until = clock_time() + (uint32_t)LOCK_HOLD_MS * CLOCK_16M_SYS_TIMER_CLK_1MS;
+                lock_hint_tick = clock_time() + (uint32_t)DCLK_CONFIRM_MS * CLOCK_16M_SYS_TIMER_CLK_1MS;
+            }
+            /* 关键:即使处于锁屏(mode=4),若正在 OTA / 上传书籍字体,也绝不能
+             * 深睡 —— 否则 pad 唤醒后上传中断(真深睡后不再每 1s 醒来处理,OTA
+             * 传不完)。另加"唤醒后逗留期"保持唤醒观察。 */
+            if (ble_get_connected() && (ebook_ble_is_uploading() || ble_get_ota_started()))
+                allow_sleep = 0;
+            else if ((int32_t)(clock_time() - lock_hold_until) < 0)
+                allow_sleep = 0;   // 唤醒后逗留观察期:先保持唤醒
+            else
+                allow_sleep = !held && !epd_update_state;
         }
         else {
             /* 非锁屏:不需要轮询唤醒定时器,关掉它。 */
@@ -234,15 +350,25 @@ _attribute_ram_code_ void main_loop(void)
             }
         }
 
+        /* BLE 数据活动保持:最近有 BLE 写(含 OTA/上传)则强制不睡,覆盖上面的
+         * mode/idle 判定 —— 刷写途中绝不能被自动锁屏+深睡打断。 */
+        if (ble_hold)
+            allow_sleep = 0;
+
         if (allow_sleep)
         {
-            /* Re-arm the BLE stack's low-power mask (ADV/connection
-             * retention).  blt_sdk_main_loop then sleeps between advertising
-             * events and wakes to transmit, so the locked device keeps
-             * advertising (discoverable) at low power.  Never enter sleep
-             * directly here: a raw cpu_sleep_wakeup bypasses the stack's
-             * power-management bookkeeping and permanently wedges the ADV
-             * scheduler (device becomes undiscoverable). */
+            /* 锁屏深睡(方案B'):广播保留但间隔拉到 2s(见 ebook_handle_lock),
+             * blt_pm_proc 的掩码含 DEEPSLEEP_RETENTION_ADV → 栈在广播间隔间
+             * 进入 deep retention(~5µA),按键 pad 秒醒,手机 2-4s 内可发现。
+             * 之前的"关广播+绕过栈直接 cpu_sleep_wakeup"方案实测失败:闭源库
+             * 的 retention 入睡是 blt_brx_sleep 里与 ADV 事件绑定的一整套编排
+             * (PHY 保存/blt_state/0x800744 锚点),裸调驱动会被降级/拒绝。 */
+            if (eb_mode == EB_MODE_LOCK && !ble_get_connected())
+                slp_log_sleep(1, bls_pm_getSuspendMask());
+            /* 休眠前把外置 Flash 置入深度断电(0xB9):待机(CS 高,数十 uA)
+             * 降到 ~1-2 uA。休眠期间不读 Flash(锁屏渲染后才睡、唤醒轮询也
+             * 不读),所以安全;下次任意 Flash 访问会自动 0xAB 唤醒。 */
+            ext_flash_deep_power_down();
             blt_pm_proc();
         }
         else
@@ -256,15 +382,13 @@ _attribute_ram_code_ void main_loop(void)
             (int32_t)(clock_time() - slp_diag_tick) >=
                 (int32_t)(SLP_DIAG_MS * CLOCK_16M_SYS_TIMER_CLK_1MS)) {
             slp_diag_tick = clock_time();
-            uint8_t held = !gpio_read(BTN_FRONT_PIN) ||
-                           !gpio_read(BTN_LEFT_PIN)  ||
-                           !gpio_read(BTN_RIGHT_PIN);
-            char sb[72];
-            sprintf(sb, "SLP: mode=%d conn=%d up=%d idle=%us to=%us epd=%d held=%d",
+            char sb[88];
+            sprintf(sb, "SLP: mode=%d conn=%d up=%d ota=%d hold=%d idle=%us to=%us epd=%d",
                     (int)eb_mode, ble_get_connected() ? 1 : 0,
-                    ebook_ble_is_uploading() ? 1 : 0,
+                    ebook_ble_is_uploading() ? 1 : 0, ble_get_ota_started() ? 1 : 0,
+                    ble_hold ? 1 : 0,
                     (unsigned)(idle_ticks / (CLOCK_16M_SYS_TIMER_CLK_1MS * 1000)),
-                    (unsigned)timeout_s, (int)epd_update_state, held ? 1 : 0);
+                    (unsigned)timeout_s, (int)epd_update_state);
             ble_log(sb);
         }
     }

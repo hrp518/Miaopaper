@@ -365,6 +365,23 @@ async function sendCmdFast(data){
   if(!wrChar){log('未连接');return}
   await wrChar.writeValueWithoutResponse(data)
 }
+// OTA goes through the WRITE (with-response) characteristic, so Windows-Chrome
+// Web Bluetooth can throw a transient "GATT operation failed for unknown
+// reason" on a single write.  Retry ONLY device-idempotent commands here
+// (erase/bank/crc re-send the same effect); a dropped data-append is handled
+// separately by the whole-upload re-sync (next chunk size re-erases and
+// re-uploads) so a retry can never double-append into the 256 B bank buffer.
+async function sendOta(data,label){
+  var tries=4, delay=150;
+  for(var t=0;t<tries;t++){
+    try{ await sendCmd(data); return; }
+    catch(e){
+      if(t===tries-1){ throw e; }
+      log('OTA '+label+' 重试'+(t+1)+' ('+(e&&e.message?e.message:e)+')');
+      await waitMs(delay*(t+1));
+    }
+  }
+}
 async function rxTx(data){
   if(!rxChar){log('未连接');return}
   await rxChar.writeValue(data)
@@ -381,6 +398,8 @@ function onNotify(data){
   var b=notifyBytes(data);
   // OTA 大块写能力探测应答(0x05 读回缓冲):一次性 waiter,优先于其他分发
   if(otaProbeCB!==null){var pr=otaProbeCB,rs=otaProbeResolve;otaProbeCB=null;otaProbeResolve=null;if(rs)rs(b);return}
+  // OTA case 6 暂存区 CRC 应答:设备通知 [0x07][hi][lo]
+  if(otaCrcCB!==null && b.length>=3 && b[0]==0x07){var cr=otaCrcCB,cs=otaCrcResolve;otaCrcCB=null;otaCrcResolve=null;if(cs)cs(((b[1]<<8)|b[2])&0xffff);return}
   if(b.length>0&&b[0]==0x19){statusNotify(b);return}
   if(b.length>0&&b[0]==0x33){lockImgNotify(b);return}
   if(b.length>0&&b[0]==0x34){settingsNotify(b);return}
@@ -499,6 +518,14 @@ function otaProbeRead(timeout){
   return new Promise(function(resolve){
     otaProbeCB=1;otaProbeResolve=resolve;
     setTimeout(function(){if(otaProbeCB!==null){otaProbeCB=null;var r=otaProbeResolve;otaProbeResolve=null;if(r)r(null)}},timeout);
+  });
+}
+var otaCrcCB=null,otaCrcResolve=null;  // OTA case 6 暂存区 CRC 的一次性 waiter
+function otaCrcCheck(timeout){
+  timeout=timeout||8000;
+  return new Promise(function(resolve){
+    otaCrcCB=1;otaCrcResolve=resolve;
+    setTimeout(function(){if(otaCrcCB!==null){otaCrcCB=null;var r=otaCrcResolve;otaCrcResolve=null;if(r)r(-1)}},timeout);
   });
 }
 function ebookNotify(b){
@@ -1195,21 +1222,21 @@ async function flashDiagSelfTest(){
 async function fwSend(){
   if(!wrChar){log('未连接');return}
   if(busy){log('设备忙，请等待当前操作完成');return}
-  log('OTA: 原版ATC方案(240B大块写 + 50ms银行延时 + 设备端CRC校验) —— 若看不到此行说明是旧缓存页，请 Ctrl+F5');
+  log('OTA: ATC方案 + case6校验 + 失败自动重传 —— 若看不到此行说明是旧缓存页，请 Ctrl+F5');
+  log('提示:请让设备停留在【书架/书库】页且最近按过键(保持唤醒)。时钟/阅读页会做逐分钟整屏刷新抢占 SPI、或自动锁屏,导致刷入很慢或连不上。1.0xa 固件已修复此问题(OTA 期间不再刷新/不睡),烧完即可任意界面刷。');
   var f=document.getElementById('fwFile').files[0];if(!f)return;
   var b=new Uint8Array(await f.arrayBuffer());
   // Validate: first 4 bytes must be KNL header (4b4e4c54)
   var hexStr=bytesToHex(b);
   if(hexStr.substring(16,24)!='4b4e4c54'){alert('不是合法的Telink固件(.bin)，头部缺少KNL标记');return}
   var ta=document.getElementById('fwCmd');
-  ta.value='固件大小: '+(b.length/1024).toFixed(1)+' KB, 擦除中...';
+  ta.value='固件大小: '+(b.length/1024).toFixed(1)+' KB';
   setBusy(true);
 
   // OTA 大块写能力探测:先发 240B 的 0x03,再经 0x05 读回缓冲偏移 0x20。
   // 若 240B 被完整接收,读回字节为 0xAA;若浏览器实际只接受 20B(静默截断),
   // 0x20 之后的字节为 0。随后 0x01 擦除会 memset 缓冲并复位 ram_position,
-  // 探测数据无残留。原版 ATC 网页就是 240B 大块写 —— Chrome 在 MTU 协商后
-  // 实际接受 ~244B(maxWriteValueLength() 只反映协商前的默认值 20,是假值)。
+  // 探测数据无残留。
   var bigOk=false;
   try{
     await sendCmd(hexToBytes('03'+'aa'.repeat(240)));
@@ -1218,86 +1245,104 @@ async function fwSend(){
     var rb=await pr;
     bigOk=!!(rb&&rb.length>0&&rb[0]===0xaa);
   }catch(e){bigOk=false}
-  log(bigOk?'大块写探测: 240B 完整接收,采用原版 ATC 大块方案(快)':'大块写探测: 浏览器仅支持小块,回退 19B 方案(慢但稳)');
+  log(bigOk?'大块写探测: 240B 完整接收':'大块写探测: 仅小块');
 
-  // Erase firmware area (0x20000..0x40000, in 4KB blocks) —— 与原版 ATC 网页一致
-  var eraseAddr=0x20000;
-  while(eraseAddr<0x40000){
-    var eraseCmd=new Uint8Array([0x01,(eraseAddr>>16)&0xff,(eraseAddr>>8)&0xff,eraseAddr&0xff]);
-    try{await sendCmd(eraseCmd)}catch(e){ta.value='擦除失败';setBusy(false);return}
-    eraseAddr+=0x1000;
-  }
-  ta.value='擦除完成，写入中...';
-
-  // Send data using the ORIGINAL ATC web page scheme (sendPart/sendFile):
-  //   - each 0x03 write carries 240 bytes (480 hex chars) when big writes are
-  //     supported (device negotiated ATT MTU 247 -> browser accepts ~244B
-  //     writes; maxWriteValueLength()=20 only reflects the pre-negotiation
-  //     default and is a lie after the MTU exchange);
-  //   - one 0x02 bank write per 256B bank;
-  //   - 50ms pause after each bank write (gives the flash time, paces the link).
-  //   Whole image = ~530 writes instead of ~7000 tiny 19B writes -> far fewer
-  //   chances for the link to drop a packet.
-  // 银行大小必须 = 0x100 (256B):设备端 ota.c 的 ramd_to_flash_temp_buffer 只有
-  // 256B,case 3 写入超出即 return 0 丢弃。
-  ta.value='写入中...';
-  startTime=new Date().getTime();
-  fwSizeComplete=hexStr.length;
-  fwBytesTransmited=0;
-
-  var bankSize=0x100;  // 256 bytes per bank,匹配设备缓冲区
-  var chunkLen=bigOk?240:19;   // bytes per 0x03 write (原版 ATC 用 240)
-  var partLen=chunkLen*2;      // hex chars per write
-  var pos=0;
-  while(pos<b.length){
-    // Collect up to bankSize bytes for this bank
-    var chunk=b.slice(pos,Math.min(pos+bankSize,b.length));
-    var chunkHex=bytesToHex(chunk);
-
-    // Send data chunks (0x03 + hex data)
-    var dataHex=chunkHex;
-    while(dataHex.length>0){
-      var curLen=Math.min(partLen,dataHex.length);
-      var dataPart=dataHex.substring(0,curLen);
-      dataHex=dataHex.substring(curLen);
-      try{await sendCmd(hexToBytes('03'+dataPart))}catch(e){ta.value='写入失败';setBusy(false);return}
-      fwBytesTransmited+=curLen;
-    }
-
-    // Write bank to flash at current address
-    var bankAddr=0x20000+pos;
-    var addrHex=decimalToHex(bankAddr,8);
-    try{await sendCmd(hexToBytes('02'+addrHex))}catch(e){ta.value='写入失败';setBusy(false);return}
-    await waitMs(50);   // 与原版 ATC 一致:每银行写入后延时 50ms
-    pos+=bankSize;
-    var pct=(pos/b.length*100).toFixed(1);
-    var elapsed=((new Date().getTime()-startTime)/1000).toFixed(1);
-    ta.value='写入: '+pos+'/'+b.length+' ('+pct+'%) '+elapsed+'s';
-  }
-
-  // 最终刷写:设备端(cmd 7)会重新计算 OTA 暂存区实际校验和并与期望值比对,
-  // 不匹配则拒绝刷写并通知 [0x08](设备保持存活,不会把残缺镜像刷入卡死)。
-  // 期望值 = sum(固件字节 + 0xFF 补齐到 0x20000) mod 65536,与设备端一致。
+  // 期望校验和 = sum(固件字节 + 0xFF 补齐到 0x20000) mod 65536, 与设备端一致。
   var expect=0;
   for(var p=0;p<0x20000;p++){ expect += (p<b.length)?b[p]:0xff; }
   expect &= 0xffff;
   var expectHex=('000'+expect.toString(16)).slice(-4);
-  ta.value='校验: 期望 0x'+expectHex+' ...';
-  otaFailFlag=0;otaDevCRC=-1;otaFlashStarted=0;
-  var cmd7err=false;
-  try{await doFinalFlash(expectHex)}catch(e){cmd7err=true;log('OTA 最终刷写命令发送异常（若此前设备已确认刷写，则这是设备重启导致的正常现象）: '+e)}
-  // 三种明确结果:0x08=拒绝;0x09 或 cmd7 发送失败(设备已重启)= 成功;都无=命令未送达。
-  await waitMs(2500);
-  setBusy(false);
-  if(otaFailFlag){
-    if(otaDevCRC>=0)
-      ta.value='❌ 校验失败：设备端实际校验和 0x'+('000'+otaDevCRC.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，上传数据不完整，未刷写';
-    else
-      ta.value='❌ 校验失败：设备拒绝刷写（上传不完整），未刷写';
-  }else if(otaFlashStarted || cmd7err){
-    ta.value='✅ 设备已确认刷写并重启（若未收到 0x09，则 cmd7 发送失败 = 设备已重启）。约 5 秒后可重新连接，确认版本 FW 1.0X';
+  var devCrc=-1;
+
+  // 擦除 OTA 暂存区 (0x20000..0x40000)
+  // 关键:命令必须是 5 字节 [0x01][4字节BE地址]。设备端 custom_otaWrite 只在
+  // data_len>=5 时解析地址;4 字节命令地址不解析(恒 0)-> 擦除被静默跳过,
+  // 残留数据越积越多 -> 校验永远是"设备 CRC 更高"的确定性失败。
+  async function doErase(){
+    var eraseAddr=0x20000;
+    while(eraseAddr<0x40000){
+      var eraseCmd=hexToBytes('01'+decimalToHex(eraseAddr,8));
+      await sendOta(eraseCmd,'erase');      // 幂等,可重试
+      await waitMs(10);                     // 留给设备完成 flash_erase_sector
+      eraseAddr+=0x1000;
+    }
+  }
+
+  // 用指定块大小上传:每 0x03 写 chunkLen 字节,每 256B 银行发 0x02 (0x02 后 50ms)。
+  async function doUpload(chunkLen){
+    startTime=new Date().getTime();
+    var bankSize=0x100, partLen=chunkLen*2, pos=0;
+    while(pos<b.length){
+      var chunk=b.slice(pos,Math.min(pos+bankSize,b.length));
+      var chunkHex=bytesToHex(chunk);
+      var dataHex=chunkHex;
+      while(dataHex.length>0){
+        var curLen=Math.min(partLen,dataHex.length);
+        var dataPart=dataHex.substring(0,curLen);
+        dataHex=dataHex.substring(curLen);
+        await sendOta(hexToBytes('03'+dataPart),'data');   // 固件丢弃超界块,重复写入安全
+      }
+      var bankAddr=0x20000+pos;
+      await sendOta(hexToBytes('02'+decimalToHex(bankAddr,8)),'bank');  // 幂等,可重试
+      await waitMs(50);
+      pos+=bankSize;
+      var pct=(pos/b.length*100).toFixed(1);
+      var elapsed=((new Date().getTime()-startTime)/1000).toFixed(1);
+      ta.value='写入'+chunkLen+'B: '+pos+'/'+b.length+' ('+pct+'%) '+elapsed+'s';
+    }
+  }
+
+  // 尝试多种块大小,每次完整重传;块大小不同,丢字节的位置通常不同 —— 重传
+  // 大概率能避开上一次的损坏点。每次上传后用 case 6 让设备算暂存区 CRC 比对。
+  var chunkSizes = bigOk ? [240,128,64] : [19];
+  var ok=false;
+  for(var attempt=0; attempt<chunkSizes.length; attempt++){
+    var chunkLen=chunkSizes[attempt];
+    ta.value='第'+(attempt+1)+'/'+chunkSizes.length+'次: 擦除+写入'+chunkLen+'B...';
+    var dataErr=null;
+    try{
+      await doErase();
+      await doUpload(chunkLen);
+    }catch(e){ dataErr=e; log('第'+(attempt+1)+'次('+chunkLen+'B)写入中断: '+(e&&e.message?e.message:e)); }
+    if(dataErr) continue;   // 数据不完整:下一块大小整体重擦+重传,不做校验
+    // case 6: 设备算暂存区实际 CRC
+    ta.value='第'+(attempt+1)+'次: 校验...';
+    var cp=otaCrcCheck(8000);
+    otaFailFlag=0;
+    await sendCmd(hexToBytes('06'));
+    devCrc=await cp;
+    if(devCrc===expect){
+      ok=true;
+      ta.value='校验通过(设备 0x'+('000'+devCrc.toString(16)).slice(-4)+'), 刷写中...';
+      log('OTA 校验通过: 设备 0x'+('000'+devCrc.toString(16)).slice(-4));
+      break;
+    }else{
+      log('第'+(attempt+1)+'次校验失败: 设备 0x'+('000'+devCrc.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，重传');
+    }
+  }
+
+  if(ok){
+    otaFailFlag=0;otaDevCRC=-1;otaFlashStarted=0;
+    var cmd7err=false;
+    try{await doFinalFlash(expectHex)}catch(e){cmd7err=true;log('OTA 最终刷写命令发送异常（若此前设备已确认刷写，则这是设备重启导致的正常现象）: '+e)}
+    await waitMs(2500);
+    setBusy(false);
+    if(otaFailFlag){
+      if(otaDevCRC>=0)
+        ta.value='❌ 校验失败：设备端实际校验和 0x'+('000'+otaDevCRC.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，未刷写';
+      else
+        ta.value='❌ 校验失败：设备拒绝刷写（上传不完整），未刷写';
+    }else if(otaFlashStarted || cmd7err){
+      ta.value='✅ 设备已确认刷写并重启。约 5 秒后可重新连接，确认版本 FW 1.0xa';
+    }else{
+      ta.value='⚠ 未收到设备确认：刷写命令可能未送达，请重试';
+    }
   }else{
-    ta.value='⚠ 未收到设备确认：刷写命令可能未送达，请重试';
+    setBusy(false);
+    if(devCrc<0)
+      ta.value='❌ OTA 写入多次被 BLE 中断，未能完整传输。请重试一次（已对幂等命令重试、对数据块自动换大小重传）。若仍失败请改用 UART 烧录器';
+    else
+      ta.value='❌ 多次重传后校验仍失败：设备 0x'+('000'+devCrc.toString(16)).slice(-4)+' ≠ 期望 0x'+expectHex+'，未刷写。若仍失败请改用 UART 烧录器';
   }
 }
 

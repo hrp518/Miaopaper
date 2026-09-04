@@ -23,6 +23,7 @@ $(OUT_PATH)/one_bit_display.o \
 $(OUT_PATH)/main.o \
 $(OUT_PATH)/button_scan.o \
 $(OUT_PATH)/ext_flash.o \
+$(OUT_PATH)/sleep_log.o \
 $(OUT_PATH)/ebook.o \
 $(OUT_PATH)/ebook_ble.o \
 $(OUT_PATH)/ebook_buttons.o \
