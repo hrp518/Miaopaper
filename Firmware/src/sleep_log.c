@@ -105,8 +105,16 @@ scanned:
         append_idx = SLP_LOG_KEEP_ON_FULL;
     }
 
-    ext_flash_page_program(SLP_LOG_ADDR + append_idx * SLP_LOG_REC_SIZE,
-                           SLP_LOG_REC_SIZE, r);
+    // 写入 + 读回校验(一次重试)。SPI 比特位拍期间偶发坏位曾产生坏记录。
+    for (int attempt = 0; attempt < 2; attempt++) {
+        ext_flash_page_program(SLP_LOG_ADDR + append_idx * SLP_LOG_REC_SIZE,
+                               SLP_LOG_REC_SIZE, r);
+        uint8_t chk[SLP_LOG_REC_SIZE];
+        ext_flash_read(SLP_LOG_ADDR + append_idx * SLP_LOG_REC_SIZE,
+                       SLP_LOG_REC_SIZE, chk);
+        if (chk[0] == SLP_MAGIC && chk[7] == rec_crc(chk))
+            break;
+    }
     append_idx++;
 }
 
@@ -233,8 +241,13 @@ void slp_log_dump(void)
             ext_flash_read(SLP_LOG_ADDR + (uint16_t)i * SLP_LOG_REC_SIZE,
                            SLP_LOG_REC_SIZE, buf);
             if (buf[0] != SLP_MAGIC || buf[7] != rec_crc(buf)) {
-                ble_log("SLPLOG: (bad record, stop)");
-                break;
+                // 坏记录:报索引并跳过(不停止,后面的记录照样可读)
+                char b[40];
+                sprintf(b, "SLPLOG: bad rec #%d (%02X %02X %02X)",
+                        (int)i, buf[0], buf[1], buf[2]);
+                ble_log(b);
+                WaitMs(20);
+                continue;
             }
             uint32_t wall = (uint32_t)buf[8] | ((uint32_t)buf[9] << 8) |
                             ((uint32_t)buf[10] << 16) | ((uint32_t)buf[11] << 24);

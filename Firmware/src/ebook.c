@@ -41,6 +41,15 @@ RAM uint8_t eb_selected = 0;
 // -> lock -> unlock -> back to reading, not always back to clock).
 RAM eb_mode_t eb_prev_mode = EB_MODE_CLOCK;
 
+// Super On:全深睡唤醒/维护后画面会反色一次(实测),入睡前的锁屏渲染主动
+// 预反色补偿,唤醒后显示正常。只影响写入面板的帧,不影响内存缓冲。
+void super_invert_if_on(void)
+{
+	if (!settings.super_sleep) return;
+	for (int i = 0; i < EB_DISP_W * EB_DISP_H / 8; i++)
+		epd_buffer[i] = ~epd_buffer[i];
+}
+
 // Pending render flag: set when mode changes to SELECT/READ but EPD is busy.
 // The main loop checks this and renders when EPD becomes available.
 RAM static uint8_t render_pending = 0;
@@ -1213,6 +1222,7 @@ static void ebook_render_lock_reading(void)
 	FixBuffer(epd_temp, epd_buffer, EB_DISP_W, EB_DISP_H);
 	/* ebook_handle_lock already cleared epd_partial_ready; commit as a full
 	 * refresh so the locked reading frame becomes the new 0x26 base map. */
+	super_invert_if_on();
 	EPD_Display(epd_buffer, NULL, EB_DISP_W * EB_DISP_H / 8, 1);  // lock: full refresh
 	epd_partial_ready = 1;
 	render_pending = 0;
@@ -1258,6 +1268,7 @@ void ebook_render_lock(void)
 		FixBuffer(epd_temp, epd_buffer, EB_DISP_W, EB_DISP_H);
 	}
 
+	super_invert_if_on();
 	EPD_Display(epd_buffer, NULL, EB_DISP_W * EB_DISP_H / 8, 1);  // lock: full refresh
 	epd_partial_ready = 1;
 }
@@ -1273,6 +1284,7 @@ void ebook_render_lock_hint(void)
 	obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 60, 46, "Locked", 1);
 	obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 12, 70, "Double Click to Unlock", 1);
 	FixBuffer(epd_temp, epd_buffer, EB_DISP_W, EB_DISP_H);
+	super_invert_if_on();
 	EPD_Display(epd_buffer, NULL, EB_DISP_W * EB_DISP_H / 8, 1);  // full GC
 	epd_partial_ready = 1;
 }
@@ -1503,7 +1515,7 @@ void ebook_select_down(void)
 // Bluetooth, pick the idle-sleep timeout and view the firmware version.
 // Navigation uses partial refresh (0xFF) after the entry full refresh.
 
-#define EB_SET_ITEM_COUNT 6   // BT / Sleep / LockScr / GC / About / Exit
+#define EB_SET_ITEM_COUNT 7   // BT / Sleep / LockScr / GC / Super / About / Exit
 RAM static uint8_t eb_set_selected = 0;
 
 static void ebook_render_settings(void)
@@ -1552,9 +1564,12 @@ static void ebook_render_settings(void)
 			break;
 		}
 		case 4:
-			strcpy(item + 1, "About");
+			strcpy(item + 1, settings.super_sleep ? "Super: On" : "Super: Off");
 			break;
 		case 5:
+			strcpy(item + 1, "About");
+			break;
+		case 6:
 			strcpy(item + 1, "Exit");
 			break;
 		default:
@@ -1641,10 +1656,15 @@ void ebook_settings_change(void)
 		save_settings_to_flash();
 		ebook_render_settings();
 		break;
-	case 4: // About
+	case 4: // toggle 超级省电: 锁屏+未连接 → 全深睡(0x80),时钟不走,~2.5µA
+		settings.super_sleep = !settings.super_sleep;
+		save_settings_to_flash();
+		ebook_render_settings();
+		break;
+	case 5: // About
 		ebook_enter_about();
 		break;
-	case 5: // Exit
+	case 6: // Exit
 		ebook_exit_settings();
 		break;
 	default:

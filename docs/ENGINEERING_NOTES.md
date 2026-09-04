@@ -104,6 +104,38 @@
   醒着的 42s 窗口里按键才有效);只给 pad 不给 timer 则锁屏即断连(更早踩坑)。
   cpu_set_gpio_wakeup + afe 0x26/0x28/0x29 的 pad 硬件寄存器是另一层,两处都要。
 
+### 超级省电模式(super_sleep,2026-09)
+
+- 设置菜单 Super: On 后,锁屏+未连接+屏稳 → 全深睡 `DEEPSLEEP_MODE(0x80)`,
+  ~2.5µA(MCU 0.4 + EPD 1 + Flash 1)。**时钟不走**:醒来=入睡时刻,连网页校准。
+- 唤醒 = 冷启动(驱动走 soft_reboot_dly13ms 路径)→ init_ble 全量重建 → 蓝牙
+  必然可用,无 retention 的栈状态残留问题 —— 这是全深睡比裸 retention 靠谱的
+  地方。被拒返回则兜底 blt_pm_proc(B')。
+- 状态持久化:`super_sleep.c` stash 记录(ext 0x7FC000,追加+压缩)存墙上秒;
+  冷启动 `ss_boot_restore()` 恢复 current_unix_time + 判定"深睡唤醒" → 直接回
+  锁屏 + 10s 操作窗(lock_hold_until),超时重睡;噪声误醒代价 ~50µA·s。
+- 入睡顺序:save_settings_to_flash → ss_stash → adv off → flash 0xB9 → 深睡。
+- **全深睡唤醒后外部 Flash 仍在 0xB9(关键坑)**:0xB9 要收到 0xAB/重新上电才
+  解除,而全深睡唤醒=软重启,RAM 里 `flash_powered_down` 标志被清零 → 固件
+  以为 Flash 醒着,此后所有外部 Flash 读写都是哑弹(读回全 0):stash 恢复
+  失败→唤醒落时钟界面、睡眠日志全变坏记录。修复:冷启动
+  `ext_flash_boot_resync()` 无条件补发 0xAB(对醒着的芯片无害)。
+- **analog 0x44 bit3(pad 唤醒状态)是粘滞位,软重启不清**:残留为 1 时,
+  0x80 入睡被驱动短路成"立即软重启" → 每 10s(操作窗时长)重启循环 + 锁屏
+  原地 GC。修复:入睡入口 `analog_write(0x44, read & ~BIT(3))` 清位;清不掉
+  则本轮退回 B'。若实测清不掉(只读位),需要换 blc_pm_procGpioPadEarlyWakeup
+  或 pm_long_sleep_wakeup 路径。
+- **全深睡必须传真实 wakeup_tick + 唤醒源含 TIMER(最终根因,2026-09)**:
+  `cpu_sleep_wakeup(0x80, PM_WAKEUP_PAD, 0)` 里 tick=0 且无 TIMER 位 → 驱动
+  不装 32k 闹钟 → 入睡瞬间闹钟到期 → 无限软重启循环(锁屏每 10s 原地 GC)。
+  正确姿势:`cpu_sleep_wakeup(DEEPSLEEP_MODE, PM_WAKEUP_PAD|PM_WAKEUP_TIMER,
+  clock_time() + 周期)`。tick 宽度 268.4s 封顶 → 维护周期取 180s:定时醒来的
+  冷启动做"维护"(时钟 +180s、刷新 stash、不渲染直接回睡,屏幕无感);
+  pad 醒来才渲染锁屏 + 10s 操作窗。外置 Flash stash 是追加写,磨损可忽略。
+- 调试代码已删(128K 体积):epd_autodetect/epd_spi_autodetect/button_scan/
+  battery_scan 的扫描(保留 PB5 差分电量测量)/cmd 0xB2-B9、E4、E9-EC、EF、
+  F3-F5、F8、0x46-0x49。保留:0xF6/0xF7 睡眠日志、0xF3 已删。
+
 ## OTA(网页)
 
 - **擦除命令必须是 5 字节 `[0x01][4字节BE地址]`**。设备端 `custom_otaWrite` 只在

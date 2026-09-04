@@ -15,13 +15,17 @@
 #include "epd.h"
 #include "etime.h"
 #include "bart_tif.h"
-#include "button_scan.h"
 #include "ebook.h"
 #include "ebook_buttons.h"
 #include "buttons.h"
 #include "charge_state.h"
 #include "battery_scan.h"
 #include "sleep_log.h"
+#include "super_sleep.h"
+
+// ebook.c/etime.c 内部变量(未在头文件声明)
+extern RAM uint8_t eb_prev_mode;
+extern RAM uint32_t current_unix_time;
 #include "drivers/8258/watchdog.h"
 #include "drivers/8258/pm.h"
 
@@ -79,12 +83,32 @@ extern settings_struct settings;
 _attribute_ram_code_ void user_init_normal(void)
 {                            // this will get executed one time after power up
     random_generator_init(); // must
+    ext_flash_boot_resync(); // 全深睡唤醒后 Flash 可能仍在 0xB9:同步状态
     init_time();
+    /* 超级省电唤醒恢复:读 ext flash stash,把墙上时钟恢复到"入睡时刻"。
+     * 必须在 init_time 之后(init_time 会重置时钟)、其余初始化之前。 */
+    uint8_t ss_flags = ss_boot_restore();
     init_ble();
     init_flash();
     ebook_init();
     ebook_buttons_init();
     charge_status_init();   // PC1 high-Z input for charge-status reading
+
+    /* 超级省电深睡唤醒(冷启动),按唤醒来源分流:
+     * - pad(真按键):渲染锁屏 + 10s 操作窗,单击/双击解锁照常;
+     * - timer(180s 维护唤醒):时钟已推进、stash 已刷新,直接回锁屏不渲染
+     *   (电子纸画面本来就在),几个主循环后自动再睡 —— 屏幕完全无感。 */
+    if (ss_flags & SS_FLAG_WAS_SUPER) {
+        if (pm_is_deepPadWakeup()) {
+            ebook_handle_lock();
+            lock_hold_until = clock_time() +
+                (uint32_t)10000 * CLOCK_16M_SYS_TIMER_CLK_1MS;
+        } else {
+            eb_prev_mode = EB_MODE_CLOCK;
+            eb_mode = EB_MODE_LOCK;      // 不渲染:维护唤醒,屏幕保持原样
+            ss_set_maintenance(1);
+        }
+    }
 
     /* BLE advertising policy: a power cycle ALWAYS starts with advertising on
      * (init_ble does bls_ll_setAdvEnable(1)), so the device is reachable from
@@ -115,7 +139,8 @@ _attribute_ram_code_ void user_init_normal(void)
 
     // 冷启动记录(含 pad 唤醒标志/唤醒源):冷启动本身 = full deep sleep、
     // 断电或看门狗复位 —— retention 唤醒不会走到这里。
-    slp_log_boot();
+    if (!ss_is_maintenance())
+        slp_log_boot();   // 维护性唤醒(180s)不记 B,防日志刷屏
 }
 
 _attribute_ram_code_ void user_init_deepRetn(void)
@@ -202,10 +227,6 @@ _attribute_ram_code_ void main_loop(void)
     // Check if there's a pending render (e.g., mode change during EPD busy)
     ebook_check_pending_render();
 
-    // Button/charge level monitor (BLE 0x46) — internal 50ms throttle.
-    btn_level_monitor_tick();
-    // Free/unused GPIO change monitor (BLE 0x48) — internal 50ms throttle.
-    free_gpio_monitor_tick();
 
     // Every 3 seconds, send debug via OTA notify (confirmed working channel).
     // Suppressed during active book/font upload to avoid interfering with
@@ -219,11 +240,7 @@ _attribute_ram_code_ void main_loop(void)
     // Every 1 second, button pin scan (only emits if state changed or every 10s heartbeat)
     if (time_reached_period(Timer_CH_4, 1))
     {
-        button_scan_tick();
-        digital_scan_tick();
         charge_state_tick();
-        adc_scan_tick();
-        vdd_scan_tick();
         battery_check_tick();
     }
 
@@ -357,18 +374,40 @@ _attribute_ram_code_ void main_loop(void)
 
         if (allow_sleep)
         {
-            /* 锁屏深睡(方案B'):广播保留但间隔拉到 2s(见 ebook_handle_lock),
-             * blt_pm_proc 的掩码含 DEEPSLEEP_RETENTION_ADV → 栈在广播间隔间
-             * 进入 deep retention(~5µA),按键 pad 秒醒,手机 2-4s 内可发现。
-             * 之前的"关广播+绕过栈直接 cpu_sleep_wakeup"方案实测失败:闭源库
-             * 的 retention 入睡是 blt_brx_sleep 里与 ADV 事件绑定的一整套编排
-             * (PHY 保存/blt_state/0x800744 锚点),裸调驱动会被降级/拒绝。 */
-            if (eb_mode == EB_MODE_LOCK && !ble_get_connected())
+            /* 超级省电(settings.super_sleep):锁屏+未连接 → 全深睡 0x80
+             * (~2.5µA)。时钟不走(醒来=入睡时刻+维护推进,连网页可校准);
+             * 唤醒=冷启动,init_ble 全量重建,蓝牙必然可用。
+             * 关键:wakeup_tick 必须是真实未来时刻且唤醒源必须含 TIMER 位 ——
+             * 否则 32k 闹钟保持 0,入睡瞬间到期 → 无限软重启循环(实测踩坑,
+             * 表现为锁屏每 10s 原地 GC)。周期 180s(16M tick 上限 268s)。
+             * 被拒返回则落到 blt_pm_proc 走 B' 兜底。 */
+            uint8_t super = (eb_mode == EB_MODE_LOCK && !ble_get_connected() &&
+                             settings.super_sleep);
+            if (super)
+            {
+                if (!ss_is_maintenance())
+                    save_settings_to_flash();  // 固化阅读位置/模式(仅真入睡,防内部Flash磨损)
+                else
+                    current_unix_time += SS_MAINT_PERIOD_S;  // 维护唤醒:时钟推进
+                ss_stash(SS_FLAG_WAS_SUPER);
+                slp_last_sleep_mode = 0x80;
+                ext_flash_deep_power_down();
+                cpu_sleep_wakeup(DEEPSLEEP_MODE,
+                                 PM_WAKEUP_PAD | PM_WAKEUP_TIMER,
+                                 clock_time() +
+                                 (uint32_t)SS_MAINT_PERIOD_S * CLOCK_16M_SYS_TIMER_CLK_1S);
+                /* 正常不返回(唤醒=软重启);返回=入睡被拒 → B' 兜底 */
+            }
+            else if (eb_mode == EB_MODE_LOCK && !ble_get_connected())
+            {
+                /* B'(无 Super 时):广播保留+2s 间隔 → retention(~5µA) */
                 slp_log_sleep(1, bls_pm_getSuspendMask());
-            /* 休眠前把外置 Flash 置入深度断电(0xB9):待机(CS 高,数十 uA)
-             * 降到 ~1-2 uA。休眠期间不读 Flash(锁屏渲染后才睡、唤醒轮询也
-             * 不读),所以安全;下次任意 Flash 访问会自动 0xAB 唤醒。 */
-            ext_flash_deep_power_down();
+                ext_flash_deep_power_down();
+            }
+            else
+            {
+                ext_flash_deep_power_down();
+            }
             blt_pm_proc();
         }
         else

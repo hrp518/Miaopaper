@@ -50,6 +50,7 @@ void reset_settings_to_default(void)
 	settings.sleep_timeout_idx = 2;  // 60s by default
 	settings.lock_read_enabled = 0;  // 阅读锁屏模式默认关: 锁屏仍显示屏保图
 	settings.epd_gc_interval_idx = 0; // GC every 10 partial refreshes
+	settings.super_sleep = 0;        // 超级省电默认关
 }
 
 void save_settings_to_flash(void)

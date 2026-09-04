@@ -22,6 +22,7 @@ typedef struct Settings_struct
 	uint8_t sleep_timeout_idx;// index into g_sleep_timeout_s: 0=15s, 1=30s, 2=60s, 3=120s (default 2)
 	uint8_t lock_read_enabled;// 阅读锁屏模式: 0=锁屏显示屏保图; 1=阅读界面直接作为屏保(锁定时保留正文并标注 Locked)
 	uint8_t epd_gc_interval_idx;// index into g_epd_gc_interval: 0=10,1=20,2=50,3=100
+	uint8_t super_sleep;// 超级省电: 锁屏+未连接 → 全深睡(0x80),时钟不走,~2.5µA
 	uint8_t crc;// Needs to be at the last position otherwise the settings can not be validated on next boot!!!!
 } settings_struct;
 

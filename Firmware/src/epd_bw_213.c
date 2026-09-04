@@ -94,7 +94,8 @@ _attribute_ram_code_ void EPD_BW_213_Full_Update(void)
 	EPD_WriteCmd(0x22);
 	EPD_WriteData(0xF7);
 	EPD_WriteCmd(0x20);
-	EPD_BW_213_WaitBusy(3000);
+	/* 满刷波形低温下 3-4s,3000ms 超时会等不到完成(实测截断 GC) */
+	EPD_BW_213_WaitBusy(6000);
 }
 
 _attribute_ram_code_ void EPD_BW_213_Part_Update(void)
@@ -159,7 +160,11 @@ uint8_t EPD_BW_213_Display(unsigned char *image, int size, uint8_t full_or_parti
 		EPD_BW_213_SetRAMCursor();
 		EPD_BW_213_WriteFrame(image, size, 0x26);
 		EPD_BW_213_Full_Update();
-		EPD_BW_213_DeepSleep();
+		/* BUSY 仍低(超时未完)时绝不能发 0x10 —— 会把波形拦腰截断,屏上冻结
+		 * 半刷帧(实测Super休眠前 GC 被切)。交给 epd_state_handler 轮询 BUSY,
+		 * 完成后经 epd_set_sleep 再进面板深睡。 */
+		if (!EPD_IS_BUSY())
+			EPD_BW_213_DeepSleep();
 	} else {
 		/*
 		 * Partial: no GPIO/SW reset — preserves 0x26 base map from last full.

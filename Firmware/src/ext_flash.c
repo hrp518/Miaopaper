@@ -75,6 +75,17 @@ void ext_flash_wake_up(void)
     WaitUs(60);   // 深度断电唤醒时间 (tRES1),留足裕量再访问
 }
 
+// 冷启动专用:全深睡(0x80)唤醒是软重启,RAM 标志被启动代码清零,但外部
+// Flash 的 0xB9 深断电要收到 0xAB(或重新上电)才解除 —— RAM 说"醒着"、
+// 物理上还睡着,此后所有读写都是哑弹(实测读回全 0)。开机无条件补一发
+// 0xAB:对醒着的芯片无害,对睡着的正好是唤醒命令。
+void ext_flash_boot_resync(void)
+{
+    ext_flash_init();
+    flash_powered_down = 1;
+    ext_flash_wake_up();
+}
+
 // 进入深度断电(0xB9):休眠阶段把 Flash 从 standby(数十 uA)降到 ~1-2 uA。
 // 幂等:已在深断电则直接返回。下次任意 Flash 访问会自动 0xAB 唤醒。
 void ext_flash_deep_power_down(void)

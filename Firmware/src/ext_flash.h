@@ -20,6 +20,8 @@ uint8_t ext_flash_is_safe(void);
 // 把外置 NOR Flash 置入深度断电(0xB9):休眠阶段从 standby(数十 uA)降到
 // ~1-2 uA。下次任意 Flash 访问(读到 0xAB)自动唤醒。幂等,可反复调用。
 void ext_flash_deep_power_down(void);
+// 冷启动调用一次:同步 RAM 标志与 Flash 物理深断电状态(无条件补发 0xAB)。
+void ext_flash_boot_resync(void);
 // 从深度断电唤醒(0xAB 释放)。通常无需显式调用 —— 每次 Flash 访问都会自动
 // 先唤醒;仅在确实需要同步等待唤醒完成时使用。
 void ext_flash_wake_up(void);
