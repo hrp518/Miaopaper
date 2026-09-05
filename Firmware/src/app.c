@@ -112,6 +112,10 @@ _attribute_ram_code_ void user_init_normal(void)
         ss_set_maintenance(1);
         lock_hold_until = clock_time() +
             (uint32_t)10000 * CLOCK_16M_SYS_TIMER_CLK_1MS;
+        /* 关键:冷启动 init_ble 会无条件重开广播 —— 超级省电锁屏必须立刻
+         * 关掉,否则每次唤醒都有 10s 可连接窗口(手机一连接就常驻唤醒)。
+         * 解锁路径 ebook_handle_unlock 会按设置恢复广播。 */
+        ble_set_advertising(0);
         analog_write(0x44, analog_read(0x44) & ~BIT(3));  // 清粘滞 pad 状态位(尽力)
     }
 
