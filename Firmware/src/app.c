@@ -35,6 +35,11 @@ extern RAM uint32_t current_unix_time;
 // 唤醒后 main_loop 立即喂狗。
 #define WD_TIMEOUT_MS 10000
 
+// EPD 刷新完成沿检测 + 完成时刻:超级省电断电前要求完成后静置 2s,
+// 避免"GC 刚刷完就断电"的面板异常(见 locked 分支 super 门槛)。
+RAM static uint8_t  prev_epd_state = 0;
+RAM static uint32_t epd_done_tick = 0;
+
 RAM uint8_t battery_level;
 RAM uint16_t battery_mv;
 RAM int16_t temperature;
@@ -68,8 +73,11 @@ _attribute_ram_code_ void app_mark_ble_activity(void)
 // "Double Click to Unlock"。同时保持唤醒,避免提示还没显示设备就再睡。
 void app_lock_observe(void)
 {
-    lock_hint_tick = clock_time() + (uint32_t)DCLK_CONFIRM_MS * CLOCK_16M_SYS_TIMER_CLK_1MS;
     lock_hold_until = clock_time() + (uint32_t)LOCK_HOLD_MS * CLOCK_16M_SYS_TIMER_CLK_1MS;
+    /* 静默唤醒(超级省电):不渲染提示 GC —— 屏上本就是锁屏画面,双击照常解锁。
+     * 提示仅普通(非超级省电)锁屏的单击时显示。 */
+    if (ss_is_maintenance()) return;
+    lock_hint_tick = clock_time() + (uint32_t)DCLK_CONFIRM_MS * CLOCK_16M_SYS_TIMER_CLK_1MS;
 }
 
 // 休眠决策诊断:每 10 秒在 BLE 日志里上报"为何未休眠",便于定位
@@ -94,20 +102,17 @@ _attribute_ram_code_ void user_init_normal(void)
     ebook_buttons_init();
     charge_status_init();   // PC1 high-Z input for charge-status reading
 
-    /* 超级省电深睡唤醒(冷启动),按唤醒来源分流:
-     * - pad(真按键):渲染锁屏 + 10s 操作窗,单击/双击解锁照常;
-     * - timer(180s 维护唤醒):时钟已推进、stash 已刷新,直接回锁屏不渲染
-     *   (电子纸画面本来就在),几个主循环后自动再睡 —— 屏幕完全无感。 */
+    /* 超级省电深睡唤醒(冷启动):一律静默回锁屏 —— 不渲染(电子纸画面
+     * 本来就在屏上)、不写盘、不推时钟。唤醒来源(pad/180s 定时)不再区分:
+     * 粘滞状态位不可靠,任何基于它的分流都会误判。唤醒后 10s 窗内按键即
+     * 解锁(lwbtn 正常扫描);无操作则走锁屏分支重新深睡。 */
     if (ss_flags & SS_FLAG_WAS_SUPER) {
-        if (pm_is_deepPadWakeup()) {
-            ebook_handle_lock();
-            lock_hold_until = clock_time() +
-                (uint32_t)10000 * CLOCK_16M_SYS_TIMER_CLK_1MS;
-        } else {
-            eb_prev_mode = EB_MODE_CLOCK;
-            eb_mode = EB_MODE_LOCK;      // 不渲染:维护唤醒,屏幕保持原样
-            ss_set_maintenance(1);
-        }
+        eb_prev_mode = EB_MODE_CLOCK;
+        eb_mode = EB_MODE_LOCK;
+        ss_set_maintenance(1);
+        lock_hold_until = clock_time() +
+            (uint32_t)10000 * CLOCK_16M_SYS_TIMER_CLK_1MS;
+        analog_write(0x44, analog_read(0x44) & ~BIT(3));  // 清粘滞 pad 状态位(尽力)
     }
 
     /* BLE advertising policy: a power cycle ALWAYS starts with advertising on
@@ -141,6 +146,11 @@ _attribute_ram_code_ void user_init_normal(void)
     // 断电或看门狗复位 —— retention 唤醒不会走到这里。
     if (!ss_is_maintenance())
         slp_log_boot();   // 维护性唤醒(180s)不记 B,防日志刷屏
+
+    // 超级省电唤醒的锁屏渲染在 user_init_normal 内同步完成:以此为 2s 静置窗
+    // 起点(超级省电断电前要求 GC 完成后静置 2s,见 locked 分支 super 门槛)。
+    epd_done_tick = clock_time();
+    prev_epd_state = 1;
 }
 
 _attribute_ram_code_ void user_init_deepRetn(void)
@@ -258,7 +268,14 @@ _attribute_ram_code_ void main_loop(void)
      *      and allow suspend on the next pass (eb_mode == LOCK case above).
      * In every other situation we force SUSPEND_DISABLE so the device
      * keeps running and the screen / time / buttons stay live. */
-    if (epd_state_handler())  // EPD refresh in progress -> keep awake
+    /* 刷新完成沿(1→0)打时间戳:超级省电断电前要求完成后静置 2s(面板波形
+     * 收尾/电荷稳定),避免"GC 刚完就断电"观感与面板异常。 */
+    uint8_t epd_busy = epd_state_handler();  // EPD refresh in progress -> keep awake
+    if (prev_epd_state && !epd_busy)
+        epd_done_tick = clock_time();
+    prev_epd_state = (epd_busy != 0);
+
+    if (epd_busy)  // EPD refresh in progress -> keep awake
     {
         /* This branch forces SUSPEND_DISABLE so the MCU never suspends while
          * the panel is refreshing.  Do NOT touch the BLE stack's wake-up
@@ -310,7 +327,7 @@ _attribute_ram_code_ void main_loop(void)
              * 根因修复):timer 供栈的 2s 广播 tick 在 retention 中自醒;pad 供
              * 按键秒醒。历史踩坑:旧代码只给 PAD(剥掉 timer → 锁屏即断连);
              * 改方案A时整行删除(只剩库默认 timer → 深睡中按键完全无效)。 */
-            bls_pm_setWakeupSource(PM_WAKEUP_PAD | PM_WAKEUP_TIMER);
+            /* 唤醒源不再全局改写:库默认(timer)供 B-prime 用,pad 由 cpu_set_gpio_wakeup 独立布防 */
             /* 方案A(唯一路径):锁屏广播保持开启(见 ebook_handle_lock)→ 栈在
              * 1s 广播间隔间走 retention(掩码 DEEPSLEEP_RETENTION_ADV),~5-10µA
              * 且手机可随时连。按钮 pad 唤醒寄存器(cpu_set_gpio_wakeup + afe
@@ -385,17 +402,18 @@ _attribute_ram_code_ void main_loop(void)
                              settings.super_sleep);
             if (super)
             {
-                if (!ss_is_maintenance())
-                    save_settings_to_flash();  // 固化阅读位置/模式(仅真入睡,防内部Flash磨损)
-                else
-                    current_unix_time += SS_MAINT_PERIOD_S;  // 维护唤醒:时钟推进
+                /* 唤醒源唯一 = PAD。wakeup_tick 必须传真实未来时刻(230s,
+                 * 驱动上限 234.9s=0xE0000000 ticks,超限拒睡/过小立即软重启
+                 * —— 反汇编 0x34-52/0x1e4-1f6 实证):闹钟仅用于 230s 一次的
+                 * 静默维护自醒(不渲染/不写盘/不推时钟,均摊 <0.2µA),按键
+                 * pad 随时秒醒。 */
                 ss_stash(SS_FLAG_WAS_SUPER);
                 slp_last_sleep_mode = 0x80;
                 ext_flash_deep_power_down();
                 cpu_sleep_wakeup(DEEPSLEEP_MODE,
-                                 PM_WAKEUP_PAD | PM_WAKEUP_TIMER,
+                                 PM_WAKEUP_PAD,
                                  clock_time() +
-                                 (uint32_t)SS_MAINT_PERIOD_S * CLOCK_16M_SYS_TIMER_CLK_1S);
+                                 (uint32_t)230 * CLOCK_16M_SYS_TIMER_CLK_1S);
                 /* 正常不返回(唤醒=软重启);返回=入睡被拒 → B' 兜底 */
             }
             else if (eb_mode == EB_MODE_LOCK && !ble_get_connected())

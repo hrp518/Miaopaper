@@ -1296,14 +1296,14 @@ void ebook_handle_lock(void)
 	// just the clock, so the user can put the device to sleep while reading.
 	eb_prev_mode = eb_mode;               // remember where we came from
 	eb_mode = EB_MODE_LOCK;
-	/* 省电:锁屏期间停止 BLE 广播。唤醒改由 app.c 的 32k 轮询定时器保证
-	 * (见 LOCK_POLL_MS),不再依赖广播事件,因此锁屏时不会有任何 RF 发射。
-	 * 解锁时(ebook_handle_unlock)按设置恢复广播。 */
-	/* 锁屏深睡(方案B'):广播保留但间隔拉长到 2s → 栈在广播间隔间进入
-	 * DEEPSLEEP_RETENTION_ADV(整机 ~5µA),按键秒醒,手机 2-4s 可发现。
-	 * 旧方案"关广播"会让链路进入 IDLE,栈回落普通 suspend(几十 µA),
-	 * 反而更费电且深睡路径被堵死。 */
-	if (settings.ble_enabled)
+	/* 锁屏蓝牙策略:
+	 * - 超级省电(settings.super_sleep):广播完全关闭 —— 锁屏即离线,全深睡
+	 *   期间无任何无线电;唤醒后按开机策略恢复广播,连网页校时/解锁照常。
+	 * - 普通模式(默认):广播保留但间隔拉长到 2s → 栈在广播间隔间走
+	 *   retention(~5µA),手机仍可发现/连接。 */
+	if (settings.super_sleep)
+		ble_set_advertising(0);
+	else if (settings.ble_enabled)
 		ble_adv_slow_for_lock();
 	{	// Debug: did the lock actually run, and does the panel state allow it?
 		char lk[48];

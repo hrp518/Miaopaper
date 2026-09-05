@@ -132,6 +132,17 @@
   clock_time() + 周期)`。tick 宽度 268.4s 封顶 → 维护周期取 180s:定时醒来的
   冷启动做"维护"(时钟 +180s、刷新 stash、不渲染直接回睡,屏幕无感);
   pad 醒来才渲染锁屏 + 10s 操作窗。外置 Flash stash 是追加写,磨损可忽略。
+- **0x80 纯 pad 唤醒循环的真因(反汇编实锤,2026-09 终版)**:
+  `cpu_sleep_wakeup_32k_rc` 入口 0x1e4-0x1f6:`analog_read(0x44)` 的
+  **bit3(IO pad 唤醒状态,粘滞锁存)为 1 且 mode==0x80 → 直接 soft_reboot
+  (不睡)**;bit3=0 → 0x3ac sleep_start 正常入睡;0x07 retention 不受影响
+  (→0x1f8),这就是为什么 retention 一直正常而全深睡循环。
+  **修复:每次冷启动钩子里 `analog_write(0x44, read & ~BIT(3))` 清锁存位**
+  (驱动自身在 0x38a 处也写 0x44=0x0F,证明该寄存器可写)。
+  另:wakeup_tick 传真实未来时刻(驱动上限 0xE0000000 ticks = 234.9s,
+  超限/为 0 都会拒睡或立即醒 —— 这就是"234 秒"的出处)。
+  应用侧形态:`cpu_sleep_wakeup(0x80, PM_WAKEUP_PAD, clock_time()+230s)`,
+  无 PM_WAKEUP_TIMER。定时唤醒(静默维护)是否存在由 0xF6 的 B 记录频率判定。
 - 调试代码已删(128K 体积):epd_autodetect/epd_spi_autodetect/button_scan/
   battery_scan 的扫描(保留 PB5 差分电量测量)/cmd 0xB2-B9、E4、E9-EC、EF、
   F3-F5、F8、0x46-0x49。保留:0xF6/0xF7 睡眠日志、0xF3 已删。
