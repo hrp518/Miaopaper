@@ -332,7 +332,10 @@ _attribute_ram_code_ void main_loop(void)
              * 根因修复):timer 供栈的 2s 广播 tick 在 retention 中自醒;pad 供
              * 按键秒醒。历史踩坑:旧代码只给 PAD(剥掉 timer → 锁屏即断连);
              * 改方案A时整行删除(只剩库默认 timer → 深睡中按键完全无效)。 */
-            /* 唤醒源不再全局改写:库默认(timer)供 B-prime 用,pad 由 cpu_set_gpio_wakeup 独立布防 */
+            /* 唤醒源 = PAD + TIMER,缺一不可(回归教训:删掉这行后,库 suspend
+             * 的唤醒源缺 pad,按键完全无法唤醒,只能 reset)。timer 供库周期
+             * 自醒,pad 供按键秒醒。 */
+            bls_pm_setWakeupSource(PM_WAKEUP_PAD | PM_WAKEUP_TIMER);
             /* 方案A(唯一路径):锁屏广播保持开启(见 ebook_handle_lock)→ 栈在
              * 1s 广播间隔间走 retention(掩码 DEEPSLEEP_RETENTION_ADV),~5-10µA
              * 且手机可随时连。按钮 pad 唤醒寄存器(cpu_set_gpio_wakeup + afe
