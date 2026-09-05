@@ -116,7 +116,8 @@ _attribute_ram_code_ void user_init_normal(void)
          * 关掉,否则每次唤醒都有 10s 可连接窗口(手机一连接就常驻唤醒)。
          * 解锁路径 ebook_handle_unlock 会按设置恢复广播。 */
         ble_set_advertising(0);
-        analog_write(0x44, analog_read(0x44) & ~BIT(3));  // 清粘滞 pad 状态位(尽力)
+        /* W1C:写 1 清除 pad 唤醒状态锁存(驱动 suspend 入口同样写 0x44=0x0F) */
+        analog_write(0x44, BIT(3));
     }
 
     /* BLE advertising policy: a power cycle ALWAYS starts with advertising on
