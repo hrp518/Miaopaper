@@ -24,6 +24,7 @@
 #include "ble.h"
 #include "app.h"
 #include "lwbtn.h"
+#include "super_sleep.h"
 
 #define LONG_PRESS_MS          1000
 #define LONG_PRESS_KEEPALIVES  (LONG_PRESS_MS / LWBTN_CFG_TIME_KEEPALIVE_PERIOD)
@@ -58,7 +59,17 @@ RAM uint32_t    btn_last_10ms;
 
 static void on_click_front(void)
 {
-    if (eb_mode == EB_MODE_LOCK) { app_lock_observe(); /* 单点击不解锁,仅GC全刷显示"Double Click to Unlock" */ }
+    if (eb_mode == EB_MODE_LOCK) {
+        /* 超级省电唤醒(reset/毛刺进入)的 10s 观察窗内:单击直接解锁。
+         * 此处静默观察(app_lock_observe)会让 reset 后的设备对按键毫无
+         * 反应 —— 用户只能再 reset。真按键唤醒已由 super_pad_unlock
+         * 直接解锁,这里只兜 reset/毛刺路径。普通锁屏仍是"单击提示,
+         * 双击解锁"。 */
+        if (ss_is_maintenance())
+            ebook_handle_unlock();
+        else
+            app_lock_observe(); /* 单点击不解锁,仅GC全刷显示"Double Click to Unlock" */
+    }
     else if (eb_mode == EB_MODE_SELECT) ebook_select_confirm();
     else if (eb_mode == EB_MODE_SETTINGS) ebook_settings_change();
     else if (eb_mode == EB_MODE_ABOUT) ebook_exit_about();

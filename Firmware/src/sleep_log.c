@@ -10,6 +10,7 @@
 #include "ebook.h"      // eb_mode
 #include "etime.h"      // current_unix_time
 #include "ext_flash.h"
+#include "buttons.h"    // BTN_*_PIN(取证读数字电平)
 #include "sleep_log.h"
 
 // etime.c 定义但未在 etime.h 声明:墙上时钟(unix 秒),retention RAM,
@@ -124,13 +125,112 @@ void slp_log_boot(void)
 {
     append_idx_valid = 0;           // 冷启动:RAM 缓存不可信,强制重扫
     slp_last_sleep_mode = 0xFF;
-    slp_rec(SLP_T_BOOT, pm_is_deepPadWakeup() ? 1 : 0,
-            (uint8_t)pm_get_wakeup_src(), bls_pm_getSuspendMask());
+    /* 复位源取证:
+     * b = cpu_wakeup_init 存的 0x44 原始字节([3:0] 唤醒源,bit6=wd_status
+     *      镜像,bit7=dcdc_rdy —— 此前 &0x0F 掩码把 bit6 看门狗证据抹掉了)。
+     * c = 数字域复位标志(数据手册 5.1.6:看门狗复位自动置 0x72[0],写 1 清除):
+     *      bit0 = 0x72[0] wd 复位标志;bit1 = TMR_STA 的 WD 标志;bit2 = 0x44[6]。
+     * 一次启动即可区分:看门狗复位(c≠0)/ pad 真唤醒(b=0x08)/ 驱动守卫复位
+     * (入睡瞬间 0x44[3]=1,见 S a=80 的 c)/ 普通上电(全 0)。 */
+    uint8_t raw44 = (uint8_t)pm_get_wakeup_src();
+    uint8_t rst = REG_ADDR8(0x72) & 0x01;                    // wd 复位标志
+    REG_ADDR8(0x72) = 0x01;                                  // W1C,防粘滞污染后续判读
+    if (reg_tmr_sta & FLD_TMR_STA_WD) rst |= 0x02;
+    if (raw44 & BIT(6)) rst |= 0x04;
+    /* bit3 = 0x35 魔数判别:direct_deep_sleep 睡前写 0x5A;0x35 深睡保留、
+     * 看门狗/软件复位清除 —— 开机读到 0x5A 即"真睡了被唤醒",清零即"没睡"。 */
+    if (analog_read(0x35) == 0x5A) rst |= 0x08;
+    analog_write(0x35, 0x00);   // 消费掉,防污染下一次判读
+    slp_rec(SLP_T_BOOT, pm_is_deepPadWakeup() ? 1 : 0, raw44, rst);
 }
 
 void slp_log_lock(uint8_t prev_mode)          { slp_rec(SLP_T_LOCK, prev_mode, 0, 0); }
 void slp_log_unlock(void)                     { slp_rec(SLP_T_UNLK, 0, 0, 0); }
 void slp_log_disc(uint8_t reason)             { slp_rec(SLP_T_DISC, reason, 0, 0); }
+
+// 超级省电(0x80 全深睡)入睡前记一条:a=0x80 标识 super,b=实际布防的唤醒源,
+// c=入睡瞬间 0x44 原始值(bit3=1 即 pad 电平仍激活 → 驱动守卫会拒绝入睡并复位,
+// 这就是"每 10s 原地重启循环"的特征位)。此前的日志时间戳因时钟恢复到入睡时刻,
+// 无法区分"睡了 0 秒被守卫复位"和"睡了 10 秒被看门狗复位" —— c 和 B 记录的
+// 复位源取证合起来才能定位。
+void slp_log_super_enter(uint8_t armed_src)
+{
+    slp_rec(SLP_T_SLP, 0x80, armed_src, analog_read(0x44));
+}
+
+// cpu_sleep_wakeup 意外返回(驱动拒睡):记 a=0x80 b=src c=0xFF 以便与入睡记录区分。
+void slp_log_super_reject(uint8_t armed_src)
+{
+    slp_rec(SLP_T_SLP, 0x80, armed_src, 0xFF);
+}
+
+// ---- 未睡原因记录(锁屏+断连却未入睡时的门状态,30s 节流) ----
+// 背景:00:25:57 锁屏 → 00:28:06 解锁,129 秒内无任何入睡尝试(无 S 记录),
+// 而未睡诊断行只在蓝牙连接时输出 —— 锁屏断连后是日志盲区。
+// 记录: a=门位图 b=epd_update_state c=0x26 实测值
+//   a.bit0=held(按键按住) bit1=epd_busy bit2=lock_hold逗留
+//   a.bit3=ble_hold(BLE写保持) —— 谁是拦截者一眼可见
+static uint32_t waitgate_last_sec = 0;
+void slp_log_wait_gate(uint8_t flags, uint8_t epd_busy, uint8_t v26)
+{
+    uint32_t now = current_unix_time;
+    if (now - waitgate_last_sec < 30)
+        return;
+    waitgate_last_sec = now;
+    slp_rec(SLP_T_WAITGATE, flags, epd_busy, v26);
+}
+
+// ---- pad 唤醒运行时取证(docs/ENGINEERING_NOTES.md "运行时取证") ----
+// 背景:0x80 入睡前 0x44[3] 恒为 1 → 驱动守卫拒睡并复位(super sleep 从未
+// 睡成)。静态审计(全反汇编)确认唤醒寄存器写入者仅 cpu_wakeup_init/
+// cpu_set_gpio_wakeup/cpu_sleep_wakeup 三处,极性/上拉/输入使能静态上均
+// 正确 —— 剩余疑点只能读回实机值分辨。
+// PADCFG#1: a=0x26 b=0x21(PA极性) c=0x22(PB极性)
+// PADCFG#2: a=0x23(PC极性) b=0x24(PD极性) c=0x27(PA使能)
+// PADCFG#3: a=0x28(PB使能) b=0x29(PC使能) c=0x2a(PD使能)
+// PADPROBE: a=位图 b=三键数字电平 c=探测后0x44
+//   a.bit0=原配置 W1C→3ms→bit3重锁;bit1=全撤使能仍重锁;bit2=仅PB4;
+//   a.bit3=仅PC0;bit4=仅PC4。b: bit0=F(PB4) bit1=L(PC4) bit2=R(PC0),1=松开。
+void slp_log_pad_forensics(void)
+{
+    slp_rec(SLP_T_PADCFG, analog_read(0x26), analog_read(0x21), analog_read(0x22));
+    slp_rec(SLP_T_PADCFG, analog_read(0x23), analog_read(0x24), analog_read(0x27));
+    slp_rec(SLP_T_PADCFG, analog_read(0x28), analog_read(0x29), analog_read(0x2a));
+
+    uint8_t save26 = analog_read(0x26);
+    uint8_t en28 = analog_read(0x28), en29 = analog_read(0x29);
+    /* 确认 IO 唤醒检测使能(0x26[4])打开,否则 bit3 无从锁存,探测无意义 */
+    analog_write(0x26, save26 | 0x10);
+
+    uint8_t probe = 0;
+    analog_write(0x44, 0x0F); WaitMs(3);
+    if (analog_read(0x44) & BIT(3)) probe |= 0x01;          // 原配置
+    analog_write(0x28, en28 & ~0x10);                       // 撤 PB4
+    analog_write(0x29, en29 & ~0x11);                       // 撤 PC0+PC4
+    analog_write(0x44, 0x0F); WaitMs(3);
+    if (analog_read(0x44) & BIT(3)) probe |= 0x02;          // 全撤
+    analog_write(0x28, en28);                               // 仅 PB4
+    analog_write(0x44, 0x0F); WaitMs(3);
+    if (analog_read(0x44) & BIT(3)) probe |= 0x04;
+    analog_write(0x28, en28 & ~0x10);                       // 仅 PC0
+    analog_write(0x29, (en29 | 0x01) & ~0x10);
+    analog_write(0x44, 0x0F); WaitMs(3);
+    if (analog_read(0x44) & BIT(3)) probe |= 0x08;
+    analog_write(0x29, (en29 | 0x10) & ~0x01);              // 仅 PC4
+    analog_write(0x44, 0x0F); WaitMs(3);
+    if (analog_read(0x44) & BIT(3)) probe |= 0x10;
+
+    /* 恢复原值,不改变后续入睡路径的任何配置 */
+    analog_write(0x28, en28);
+    analog_write(0x29, en29);
+    analog_write(0x26, save26);
+
+    uint8_t lvl = 0;
+    if (gpio_read(BTN_FRONT_PIN)) lvl |= 0x01;
+    if (gpio_read(BTN_LEFT_PIN))  lvl |= 0x02;
+    if (gpio_read(BTN_RIGHT_PIN)) lvl |= 0x04;
+    slp_rec(SLP_T_PADPROBE, probe, lvl, analog_read(0x44));
+}
 
 void slp_log_sleep(uint8_t armed_wake_src, uint8_t suspend_mask)
 {
@@ -181,7 +281,7 @@ void slp_log_wake_capture(void)
     wake_capture_pending = 0;
     if (pend == 1) {
         // pad 唤醒 = 真按键(user_init_deepRetn 只在 pad 时 arm)。
-        slp_rec(SLP_T_WAKE, 1, (uint8_t)pm_get_wakeup_src(),
+        slp_rec(SLP_T_WAKE, 1, (uint8_t)pm_get_wakeup_src() & 0x0F,
                 slp_last_sleep_mode);
     } else if (pend == 3) {
         // retention 心跳:非 pad 唤醒。60s 节流,防刷 Flash。
@@ -192,7 +292,7 @@ void slp_log_wake_capture(void)
             return;
         retick_last_sec = now_sec;
         slp_rec(SLP_T_RETICK, pm_is_deepPadWakeup() ? 1 : 0,
-                (uint8_t)pm_get_wakeup_src(), 0);
+                (uint8_t)pm_get_wakeup_src() & 0x0F, 0);
     } else {
         // suspend 唤醒:只在未连接时记录(连接态每 7.5ms 一次,禁止写)。
         if (!ble_get_connected()) {

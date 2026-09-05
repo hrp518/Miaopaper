@@ -194,10 +194,19 @@ _attribute_ram_code_ void ble_disconnect_callback(uint8_t e, uint8_t *p, int n)
 	printf("BLE disconnected\r\n");
 }
 
-_attribute_ram_code_ void user_set_rf_power(uint8_t e, uint8_t *p, int n)
+// 只设 RF 功率,不碰日志(初始化用)。此前 init_ble 直接调 user_set_rf_power(0,0,0),
+// 会连带 slp_log_suspend_exit() → 每次冷启动都伪造一条 "W a=02 c=FF",
+// 把 SLPLOG 里的 W 记录污染成"冷启动记号"(GPT 报告指出,核实属实)。
+_attribute_ram_code_ static void apply_rf_power(void)
 {
 	rf_set_power_level_index(RF_POWER_P3p01dBm);
+}
+
+_attribute_ram_code_ void user_set_rf_power(uint8_t e, uint8_t *p, int n)
+{
+	apply_rf_power();
 	// 休眠诊断:每次从 suspend 醒来都会走到这里,顺手标记一次 suspend 唤醒。
+	// 只允许真实的 SUSPEND_EXIT 事件回调进入本函数。
 	slp_log_suspend_exit();
 }
 
@@ -296,7 +305,7 @@ void init_ble(void)
 	bls_ll_setScanRspData((uint8_t *)ble_name, sizeof(ble_name));
 	bls_ll_setAdvParam(ADVERTISING_INTERVAL, ADVERTISING_INTERVAL + 50, ADV_TYPE_CONNECTABLE_UNDIRECTED, OWN_ADDRESS_PUBLIC, 0, NULL, BLT_ENABLE_ADV_ALL, ADV_FP_NONE);
 	bls_ll_setAdvEnable(1);
-	user_set_rf_power(0, 0, 0);
+	apply_rf_power();   // 初始化只设功率;不再经 user_set_rf_power(会伪造 W 记录)
 	bls_app_registerEventCallback(BLT_EV_FLAG_SUSPEND_EXIT, &user_set_rf_power);
 	bls_app_registerEventCallback(BLT_EV_FLAG_CONNECT, &ble_connect_callback);
 	bls_app_registerEventCallback(BLT_EV_FLAG_TERMINATE, &ble_disconnect_callback);

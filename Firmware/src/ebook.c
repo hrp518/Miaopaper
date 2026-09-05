@@ -15,6 +15,7 @@
 #include "epd_refresh.h"
 #include "buttons.h"
 #include "sleep_log.h"
+#include "super_sleep.h"
 
 #ifndef PROGMEM
 #define PROGMEM
@@ -1330,6 +1331,10 @@ void ebook_handle_lock(void)
 void ebook_handle_unlock(void)
 {
 	if (eb_mode != EB_MODE_LOCK) return;
+	/* 解锁=开始正常使用:退出"超级省电唤醒观察"状态。否则 maintenance 会
+	 * 一直为 1,本次会话里再次锁屏后单击 F 也会直接解锁(ebook_buttons
+	 * 的 maintenance 分支),误触即唤醒+全刷。 */
+	ss_set_maintenance(0);
 	/* 恢复广播(锁屏时拉长了间隔):还原 1s 快广播。BLE 关闭设置的用户保持关闭。 */
 	if (settings.ble_enabled)
 		ble_adv_restore_fast();

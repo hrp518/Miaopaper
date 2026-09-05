@@ -18,7 +18,7 @@
 #define SLP_LOG_KEEP_ON_FULL  32    // 扇区写满时整理后保留的最近条数
 
 // record type 字节
-#define SLP_T_BOOT  1   // 冷启动(main()->user_init_normal)。a=pad唤醒标志 b=wakeup_src c=suspend掩码
+#define SLP_T_BOOT  1   // 冷启动(main()->user_init_normal)。a=pad唤醒标志 b=wakeup_src c=复位源取证
 #define SLP_T_LOCK  2   // 加锁。a=eb_prev_mode
 #define SLP_T_SLP   3   // 锁屏且未连接、即将 blt_pm_proc 深睡。a=上次SUSPEND_ENTER模式 b=唤醒源 c=掩码
 #define SLP_T_WAKE  4   // 唤醒。a=1 retention唤醒(pad标志) / a=2 suspend唤醒; c=睡前的模式字节
@@ -26,6 +26,9 @@
 #define SLP_T_UNLK  6   // 解锁
 #define SLP_T_RETICK 8  // retention 心跳:非 pad 的 retention 唤醒(广播 tick 等),
                         // 60s 节流记一条 —— 出现即证明栈在 retention 里循环睡眠。
+#define SLP_T_PADCFG 9   // 运行时取证:pad 唤醒寄存器原始值(见 slp_log_pad_forensics)
+#define SLP_T_PADPROBE 10 // 运行时取证:逐脚 bisect 定位 0x44[3] 锁存源
+#define SLP_T_WAITGATE 11  // 未睡原因:锁屏+断连却未入睡的门状态(30s 节流)
 
 // 在 init_ble 里注册到 BLT_EV_FLAG_SUSPEND_ENTER。SDK 约定 p[0] 是栈即将进入的
 // 睡眠模式(0x00=suspend, 0x07=deep retention 32k)。此回调每次 conn/adv 事件间
@@ -45,7 +48,17 @@ void slp_log_wake_capture(void);
 
 // 锁屏、未连接、即将调 blt_pm_proc 深睡前调用(内部 5s 节流)。
 void slp_log_sleep(uint8_t armed_wake_src, uint8_t suspend_mask);
-void slp_log_boot(void);            // user_init_normal 末尾调
+// 超级省电(0x80)入睡前调用一次(无节流):a=0x80, b=布防的唤醒源,
+// c=入睡瞬间 0x44 原始值(bit3=1 → 驱动守卫将拒睡并复位)。
+void slp_log_super_enter(uint8_t armed_src);
+// cpu_sleep_wakeup(0x80) 意外返回(拒睡)时记一条:c=0xFF 标识。
+void slp_log_super_reject(uint8_t armed_src);
+// pad 唤醒运行时取证(超级省电入睡前调用):寄存器原始值转储 + 逐脚 bisect。
+// 记录布局见 docs/ENGINEERING_NOTES.md "运行时取证"。
+void slp_log_pad_forensics(void);
+// 未睡原因记录(内部 30s 节流):flags 门位图见 sleep_log.c 注释
+void slp_log_wait_gate(uint8_t flags, uint8_t epd_busy, uint8_t v26);
+void slp_log_boot(void);            // user_init_normal 末尾调;含复位源取证(b/c)
 void slp_log_lock(uint8_t prev_mode);
 void slp_log_unlock(void);
 void slp_log_disc(uint8_t reason);
