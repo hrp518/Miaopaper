@@ -402,19 +402,16 @@ _attribute_ram_code_ void main_loop(void)
                              settings.super_sleep);
             if (super)
             {
-                /* 唤醒源唯一 = PAD。wakeup_tick 必须传真实未来时刻(230s,
-                 * 驱动上限 234.9s=0xE0000000 ticks,超限拒睡/过小立即软重启
-                 * —— 反汇编 0x34-52/0x1e4-1f6 实证):闹钟仅用于 230s 一次的
-                 * 静默维护自醒(不渲染/不写盘/不推时钟,均摊 <0.2µA),按键
-                 * pad 随时秒醒。 */
+                /* 唤醒源唯一 = PAD(规范要求)。wakeup_tick = 0:全深睡下
+                 * 不使用定时唤醒(数据手册:全深睡仅外部 pad 唤醒),此前
+                 * 180s/230s 定时自醒已按规范整体移除。pad 唤醒状态锁存位
+                 * (analog 0x44 bit3)在本次冷启动钩子中已清零,不会短路
+                 * 本次入睡。 */
                 ss_stash(SS_FLAG_WAS_SUPER);
                 slp_last_sleep_mode = 0x80;
                 ext_flash_deep_power_down();
-                cpu_sleep_wakeup(DEEPSLEEP_MODE,
-                                 PM_WAKEUP_PAD,
-                                 clock_time() +
-                                 (uint32_t)230 * CLOCK_16M_SYS_TIMER_CLK_1S);
-                /* 正常不返回(唤醒=软重启);返回=入睡被拒 → B' 兜底 */
+                cpu_sleep_wakeup(DEEPSLEEP_MODE, PM_WAKEUP_PAD, 0);
+                /* 正常不返回(唤醒=软重启冷启动);返回=入睡被拒 → B' 兜底 */
             }
             else if (eb_mode == EB_MODE_LOCK && !ble_get_connected())
             {
