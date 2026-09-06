@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>MP 深睡诊断扫描</title>
+<style>
+  body{font-family:system-ui,"Microsoft YaHei";max-width:760px;margin:24px auto;padding:0 12px;background:#111;color:#ddd}
+  h3{margin:8px 0}
+  #status{font-size:20px;padding:10px 14px;border-radius:8px;margin:10px 0;font-weight:600}
+  .on{background:#173d17;color:#8f8}.off{background:#3d1717;color:#f88}
+  #log{background:#000;border:1px solid #333;border-radius:8px;padding:10px;height:320px;overflow-y:auto;
+       font-family:Consolas,monospace;font-size:14px;white-space:pre}
+  .pad{color:#8f8;font-weight:700}
+  button{font-size:18px;padding:10px 26px;border-radius:8px;border:0;background:#2d6cdf;color:#fff;cursor:pointer}
+  .hint{color:#888;font-size:13px;line-height:1.7}
+  b.k{color:#ffd166}
+</style>
+</head>
+<body>
+<h3>MP 深睡诊断(广播黑盒)</h3>
+<button id="btn">开始监听</button>
+<div id="status" class="off">未连接</div>
+<div id="log"></div>
+<p class="hint">
+操作:点按钮 → 选择器里选那台设备(广播中才出现,名字可能是"未知设备") → 之后实时显示诊断字节。<br>
+判读:<b class="k">cnt</b>=开机次数(中途复位会清零) ·
+<b class="k">sleep</b>=上次入睡→本次开机真实断电秒数 ·
+<b class="k">mark</b>=5A 真掉电 / 00 中途被复位打断 ·
+<b class="k">w44</b>=唤醒源(bit3=<span class="pad">PAD!</span> 按键唤醒,bit2=core,bit1=timer)<br>
+流程:看到"广播中"→ 等 ~10 秒变"已断电(睡着)"→ 单按 F → 重新出现,读那一行。
+</p>
+<script>
+const CID = 0x504D;   // 'M','P'
+let lastAdv = 0, dev = null, timer = null;
+const $ = id => document.getElementById(id);
+
+function line(cls, txt){
+  const d = new Date().toTimeString().slice(0,8);
+  const div = document.createElement('div');
+  if(cls) div.className = cls;
+  div.textContent = `[${d}] ${txt}`;
+  $('log').appendChild(div); $('log').scrollTop = 1e9;
+}
+function onAdv(ev){
+  lastAdv = Date.now();
+  $('status').textContent = '● 广播中'; $('status').className = 'on';
+  let dv = null;
+  try{ dv = ev.manufacturerData.get(CID); }catch(e){}
+  if(!dv || dv.byteLength < 5){
+    line('', `adv (无诊断数据) rssi=${ev.rssi}`); return;
+  }
+  const cnt = dv.getUint8(0), el = dv.getUint16(1), mark = dv.getUint8(3), w44 = dv.getUint8(4);
+  let f = [];
+  if(w44 & 0x08) f.push('PAD!');
+  if(w44 & 0x04) f.push('core');
+  if(w44 & 0x02) f.push('timer');
+  line((w44 & 0x08)?'pad':'',
+       `cnt=${cnt}  sleep=${el}s  mark=${mark===0x5A?'5A(真掉电)':('0x'+mark.toString(16))}  w44=0x${w44.toString(16).padStart(2,'0')}  ${f.join(' ')}`);
+}
+$('btn').onclick = async () => {
+  try{
+    dev = await navigator.bluetooth.requestDevice({
+      filters:[{ manufacturerData:[{companyIdentifier:CID}] }],
+      optionalServices:[]
+    });
+  }catch(e){ line('', '选择器取消/失败: '+e.message); return; }
+  line('', '已选定设备,开始监听广播…(断电=收不到;唤醒后自动恢复)');
+  if(!dev.watchAdvertisements){
+    line('', '此 Chrome 未开启 watchAdvertisements:地址栏进 chrome://flags 搜 watchAdvertisements 设为 Enabled 并重启浏览器;或用 web_tools\\mp_scan.bat 双击运行命令行版。');
+    return;
+  }
+  try{ await dev.watchAdvertisements(); }catch(e){ line('', 'watchAdvertisements 失败: '+e.message); return; }
+  dev.addEventListener('advertisementreceived', onAdv);
+  lastAdv = Date.now();
+  timer = setInterval(()=>{
+    if(Date.now() - lastAdv > 8000){
+      $('status').textContent = '○ 已断电(睡着)'; $('status').className = 'off';
+    }
+  }, 1000);
+};
+</script>
+</body>
+</html>

@@ -44,8 +44,10 @@ RAM eb_mode_t eb_prev_mode = EB_MODE_CLOCK;
 
 // Super On:全深睡唤醒/维护后画面会反色一次(实测),入睡前的锁屏渲染主动
 // 预反色补偿,唤醒后显示正常。只影响写入面板的帧,不影响内存缓冲。
+// (2026-09-06:用户要求取消屏保反色 —— 函数保留、直接 return,调用点不动。)
 void super_invert_if_on(void)
 {
+	return;   // 反色补偿已按需求禁用
 	if (!settings.super_sleep) return;
 	for (int i = 0; i < EB_DISP_W * EB_DISP_H / 8; i++)
 		epd_buffer[i] = ~epd_buffer[i];

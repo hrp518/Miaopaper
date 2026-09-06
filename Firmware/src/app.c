@@ -130,14 +130,18 @@ _attribute_ram_code_ void user_init_normal(void)
         ble_set_advertising(0);
     }
 
-    /* 0x80 深睡按键布防 —— 官方 8258_ble_sample 原样(user_init 里一次布防,
-     * 例子里极性 Level_High;本板按键 active-low 接地,按用户要求唯一差异:
-     * Level_Low)。0x80 唤醒=冷启动,每次开机重新布防,放这里而非 LOCK 分支。 */
+    /* 0x80 深睡按键布防 —— mp_sleeptest 完整复刻(官方 0x80+按键唤醒实证):
+     * Level_Low 布防 + 引脚常态低(100K 下拉,见 btn_reconfig_gpio)+ 输入
+     * 常开 + 数字域 GPIO 唤醒(0x6e[3],黑盒 w44=0x8C 实证其参与)。
+     * 0x80 唤醒=冷启动,每次开机重新布防,放这里而非 LOCK 分支。 */
     if (settings.super_sleep) {
-        cpu_set_gpio_wakeup(BTN_FRONT_PIN, Level_High, 1);
-        cpu_set_gpio_wakeup(BTN_LEFT_PIN,  Level_High, 1);
-        cpu_set_gpio_wakeup(BTN_RIGHT_PIN, Level_High, 1);
+        cpu_set_gpio_wakeup(BTN_FRONT_PIN, Level_Low, 1);
+        cpu_set_gpio_wakeup(BTN_LEFT_PIN,  Level_Low, 1);
+        cpu_set_gpio_wakeup(BTN_RIGHT_PIN, Level_Low, 1);
         bls_pm_setWakeupSource(PM_WAKEUP_PAD);   // 例子同款:栈唤醒源=PAD
+        /* 黑盒实测(mp_sleeptest):按键唤醒成立时 w44=0x8C 含 bit2(CORE)=
+         * 数字域 GPIO 唤醒(0x6e[3])与 pad 位同锁存,数字域在参与。 */
+        REG_ADDR8(0x6e) |= 0x08;   // digital GPIO wakeup enable
         analog_write(0x44, 0x0F);   // 洗布防写入毛刺
     }
 

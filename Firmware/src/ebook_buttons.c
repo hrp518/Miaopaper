@@ -200,10 +200,10 @@ static void btn_reconfig_gpio(void)
         gpio_set_func(pins[i], AS_GPIO);
         gpio_set_output_en(pins[i], 0);
         gpio_set_input_en(pins[i], 1);
-        /* 03:49 原样(用户指示):F(PB4) FLOAT,L/R 10K */
-        uint8_t pull = (pins[i] == BTN_FRONT_PIN) ? PM_PIN_UP_DOWN_FLOAT
-                                                  : PM_PIN_PULLUP_10K;
-        gpio_setup_up_down_resistor(pins[i], pull);
+        /* 10K 上拉:接地按键,松开=高,与 mp_sleeptest 板上实测一致
+         * (Level_Low 布防 + 松开高 + 按下低 = 官方黑盒验证的唤醒组合;
+         * 之前改 100K 下拉是误判,回退)。 */
+        gpio_setup_up_down_resistor(pins[i], PM_PIN_PULLUP_10K);
     }
 }
 
