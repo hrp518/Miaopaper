@@ -85,9 +85,11 @@ void app_lock_observe(void)
 #define SLP_DIAG_MS 10000
 RAM static uint32_t slp_diag_tick = 0;
 
-// 超级省电 pad 唤醒:首个 main_loop 里直接解锁(user_init_normal 里置位,
-// 那时 irq 还没开,渲染/写 Flash 放到 main_loop 上下文做)。
-RAM uint8_t super_pad_unlock = 0;
+// 0x80 深睡:pad 为主动唤醒;此值=兜底维护定时(驱动 tick 上限 234.9s,取 180s)
+#define SUPER_SLEEP_WAKE_MS   180000
+
+// 0x80 pad 唤醒(冷启动)后:首轮 main_loop 强制全刷回时钟(屏上还是锁屏图)
+RAM uint8_t super_wake_redraw = 0;
 
 // Settings
 extern settings_struct settings;
@@ -106,35 +108,17 @@ _attribute_ram_code_ void user_init_normal(void)
     ebook_buttons_init();
     charge_status_init();   // PC1 high-Z input for charge-status reading
 
-    /* 超级省电深睡唤醒(冷启动):pad 唤醒(真按键)→ 直接解锁。此前设计是
-     * "静默回锁屏 + 10s 观察窗",实测有个致命 UX 问题:唤醒那一击(click1)
-     * 落在冷启动期间,lwbtn 看不到它;用户双击的第二击(click2)到达时只是
-     * 一次"单击"→ 不解锁;设备又不渲染不广播 → 看起来就是"双击唤不醒"。
-     * 每次唤醒=冷启动,所以双击的第一击永远被吞,第二击永远是单击 ——
-     * 只有用户隔几秒再补一个完整双击才能解锁(SLPLOG 里 W,W,U 的实测序列)。
-     * 现在:pad 唤醒 = 明确的按键意图,首个 main_loop 直接解锁回时钟屏
-     * (屏幕刷新即反馈);非 pad 唤醒(毛刺)仍走静默锁屏+重睡,零开销。
-     *
-     * 注:0x44[3] 必须在下面 W1C 清除之前读 —— pm_is_deepPadWakeup() 不可靠
-     * (cpu_wakeup_init 要求 pad/timer 状态位恰为 0x08 才置位,组合态会漏判)。
-     * 毛刺误唤醒的代价 = 一次解锁全刷 + 60s 后重新入睡,实测 16h 深睡零毛刺
-     * (16us 滤波位 0x26[3] 不能用:会触发驱动入睡守卫的硬复位循环,见
-     * super 分支注释),可接受。 */
+    /* 超级省电(0x80)唤醒:官方 PM CASE4(纯 PAD 深睡唤醒)正解。醒来只有两种
+     * 可能:按键按下(唤醒意图)或复位/上电 —— 统一按"用户要用设备"处理:
+     * 回时钟屏、广播保持 init_ble 默认 ON(手机可连)、首轮强制全刷覆盖屏上的
+     * 锁屏图。唤醒后正常 60s 空闲 → 锁屏 → 再深睡。
+     * pad 布防已在下方本函数尾部一次性完成(user_init_normal),整个会话不再
+     * 重写 0x28/0x29(官方 CASE4:布防一次,循环里不碰 pad 寄存器)。 */
     if (ss_flags & SS_FLAG_WAS_SUPER) {
-        uint8_t pad_wake = (analog_read(0x44) & BIT(3)) ? 1 : 0;
+        analog_write(0x44, BIT(3));   // W1C 清唤醒状态锁存
         eb_prev_mode = EB_MODE_CLOCK;
-        eb_mode = EB_MODE_LOCK;
-        ss_set_maintenance(1);
-        lock_hold_until = clock_time() +
-            (uint32_t)10000 * CLOCK_16M_SYS_TIMER_CLK_1MS;
-        /* 关键:冷启动 init_ble 会无条件重开广播 —— 超级省电锁屏必须立刻
-         * 关掉,否则每次唤醒都有 10s 可连接窗口(手机一连接就常驻唤醒)。
-         * 解锁路径 ebook_handle_unlock 会按设置恢复广播。 */
-        ble_set_advertising(0);
-        /* W1C:写 1 清除 pad 唤醒状态锁存(驱动 suspend 入口同样写 0x44=0x0F) */
-        analog_write(0x44, BIT(3));
-        if (pad_wake)
-            super_pad_unlock = 1;   // 延迟到首个 main_loop(irq 已开)再解锁
+        ss_set_maintenance(0);
+        super_wake_redraw = 1;        // 首轮 main_loop 强制全刷回时钟(见下)
     }
 
     /* BLE advertising policy: a power cycle ALWAYS starts with advertising on
@@ -144,6 +128,17 @@ _attribute_ram_code_ void user_init_normal(void)
      * the web page after any reboot without bricking the device. */
     if (!settings.ble_enabled) {
         ble_set_advertising(0);
+    }
+
+    /* 0x80 深睡按键布防 —— 官方 8258_ble_sample 原样(user_init 里一次布防,
+     * 例子里极性 Level_High;本板按键 active-low 接地,按用户要求唯一差异:
+     * Level_Low)。0x80 唤醒=冷启动,每次开机重新布防,放这里而非 LOCK 分支。 */
+    if (settings.super_sleep) {
+        cpu_set_gpio_wakeup(BTN_FRONT_PIN, Level_High, 1);
+        cpu_set_gpio_wakeup(BTN_LEFT_PIN,  Level_High, 1);
+        cpu_set_gpio_wakeup(BTN_RIGHT_PIN, Level_High, 1);
+        bls_pm_setWakeupSource(PM_WAKEUP_PAD);   // 例子同款:栈唤醒源=PAD
+        analog_write(0x44, 0x0F);   // 洗布防写入毛刺
     }
 
     /* Seed the activity timer so the device does NOT immediately go to
@@ -171,6 +166,7 @@ _attribute_ram_code_ void user_init_normal(void)
     // 无法区分"按键没唤醒"和"唤醒了但没记录"。现在每次冷启动一条,
     // a=1 即 pad 唤醒,a=0 即复位/断电/看门狗。
     slp_log_boot();
+    slp_log_elapsed();   // 开机即量真实断电时长(见 sleep_log.c)
 
     // 超级省电唤醒的锁屏渲染在 user_init_normal 内同步完成:以此为 2s 静置窗
     // 起点(超级省电断电前要求 GC 完成后静置 2s,见 locked 分支 super 门槛)。
@@ -296,14 +292,15 @@ _attribute_ram_code_ void main_loop(void)
         set_air_tag_adv_data();
     }
 
-    /* 超级省电 pad 唤醒的延迟解锁(见 user_init_normal):放在电池采样后,
-     * 唤醒首页的电池图标不会显示 0;irq 已开,与 B' 唤醒的双击解锁走完全
-     * 相同的 ebook_handle_unlock 路径 —— 恢复广播、回时钟屏(全刷=用户
-     * 可见反馈)、记 U。 */
-    if (super_pad_unlock) {
-        super_pad_unlock = 0;
-        ebook_handle_unlock();
+    /* 0x80 pad 唤醒(冷启动)首轮:全刷覆盖屏上的锁屏图,回时钟(用户按键意图) */
+    if (super_wake_redraw) {
+        super_wake_redraw = 0;
+        set_EPD_wait_flush();
     }
+    /* 维护窗口内手机连上 → 自动解锁回时钟(全刷=用户可见)。ebook_handle_unlock
+     * 会清 maintenance、恢复快广播。 */
+    if (eb_mode == EB_MODE_LOCK && ss_is_maintenance() && ble_get_connected())
+        ebook_handle_unlock();
 
     if (eb_mode == EB_MODE_CLOCK) {
         ebook_button_tick();
@@ -403,21 +400,15 @@ _attribute_ram_code_ void main_loop(void)
                            !gpio_read(BTN_RIGHT_PIN);
             // 三按钮布防:cpu_set_gpio_wakeup(pin, Level_Low, 1) 一次搞定
             // per-pin 使能(0x27+port)与极性(0x21+port)。
-            // !!布防只做一次!! 运行取证(2026-09-05 SLP_T_PADPROBE)实锤:
-            // 对 0x28/0x29 使能寄存器的每一次写入都会让 0x44[3] 毛刺置位
-            // (probe 五态全 0=引脚电平干净;恢复使能后立即读=0x88)。此前
-            // 每个 main_loop 周期重复布防 → bit3 永远是 1 → 0x80 入睡守卫
-            // 必拒睡复位(super sleep 从未睡成)。
-            // 以硬件实际状态为准(cpu_wakeup_init 在每次启动/retention 唤醒
-            // 都会清 0x27~0x2a,清过就重布防),不用 RAM 标志:
-            if (!(analog_read(0x28) & 0x10) || !(analog_read(0x29) & 0x11)) {
-                cpu_set_gpio_wakeup(BTN_FRONT_PIN, Level_Low, 1);
-                cpu_set_gpio_wakeup(BTN_LEFT_PIN,  Level_Low, 1);
-                cpu_set_gpio_wakeup(BTN_RIGHT_PIN, Level_Low, 1);
+            // !!仅 B'(非 super)需要!! super 0x80 维护睡眠必须保持 pad 撤防:
+            // 运行取证(2026-09-05 SLP_T_PADPROBE)实锤布防写入会致 0x44[3]
+            // 毛刺置位 → 驱动守卫拒睡(super sleep 全深睡实测只能走定时唤醒)。
+            if (!settings.super_sleep &&
+                (!(analog_read(0x28) & 0x10) || !(analog_read(0x29) & 0x11))) {
+                cpu_set_gpio_wakeup(BTN_FRONT_PIN, Level_High, 1);
+                cpu_set_gpio_wakeup(BTN_LEFT_PIN,  Level_High, 1);
+                cpu_set_gpio_wakeup(BTN_RIGHT_PIN, Level_High, 1);
                 analog_write(0x44, 0x0F);   // 洗掉布防写入自产的毛刺
-            }
-            else if (analog_read(0x44) & BIT(3)) {
-                analog_write(0x44, 0x0F);   // 运行中若再置位,入睡前洗掉
             }
             /* 唤醒源寄存器(0x26)不再在本分支反复写! 运行取证:? a=50 实测
              * LOCK 分支每轮 setWakeupSource(PAD|TIMER) 把 0x26 写成 0x50:
@@ -504,43 +495,28 @@ _attribute_ram_code_ void main_loop(void)
                              settings.super_sleep);
             if (super)
             {
-                /* 唤醒源唯一 = PAD(规范要求)。wakeup_tick = 0:全深睡下
-                 * 不使用定时唤醒(数据手册:全深睡仅外部 pad 唤醒)。
-                 *
-                 * !!不要给 src 塞 afe_0x26[3](16us 滤波位)!! 驱动入睡时执行
-                 * analog_write(0x26, src&0xFF)(反汇编核实),曾借道 src|BIT(3)
-                 * 想恢复抗抖滤波 —— 实测(2026-09-05 20:37 SLPLOG)0x26[3]=1
-                 * 会让 0x44[3] pad 唤醒状态在驱动的入睡检查点被锁存,驱动随即
-                 * 走"pad 已在唤醒电平"守卫:soft_reboot_dly13ms(13ms) + 写
-                 * 复位寄存器 0x6f=0x20(反汇编 0x442 处)→ 硬复位。表现为
-                 * S a=80 → 同秒 B a=00(b=0 无唤醒源)→ 10s 观察窗 → 再试的
-                 * 无限重启循环,0x26=0x10(纯 PAD)则实测可稳定睡 16h。
-                 * LOCK 分支里对 0x26 的 |=0x08 同样无效(驱动整写覆盖),
-                 * 滤波只能放弃;实测 16h 深睡零毛刺唤醒,可接受。
-                 * pad 唤醒状态锁存位(analog 0x44 bit3)在冷启动钩子中已清零;
-                 * 若入睡瞬间恰有按键按住(0x44[3] 被硬件置回),同一守卫会
-                 * 复位而不睡 —— 重启路径回到这里,松手后自然入睡,自愈。 */
-                /* pad 唤醒运行时取证(一次定位 0x44[3] 锁存源,布局见
-                 * docs/ENGINEERING_NOTES.md):寄存器转储 + 逐脚 bisect。
-                 * 探测自身恢复原值,不影响本次入睡。 */
-                slp_log_pad_forensics();
+                /* 03:49 形态(用户指示回退):不设静置状态机(实测老 SDK 的
+                 * _attribute_data_retention_ 不保证落位,data+bss 33.6K>32K
+                 * 保留窗,static 每 2s retention 醒即丢,静置永远完不成)。
+                 * 直接:retention 掩码 + PAD 唤醒源 + stash/日志(写入后紧接
+                 * 调用,03:49 实测疑似可入睡)→ 裸调 cpu_sleep_wakeup(0x80,
+                 * PAD, 0)。本轮重点验证"唤醒无效"到底卡哪。 */
+                bls_pm_setSuspendMask(SUSPEND_ADV | DEEPSLEEP_RETENTION_ADV |
+                                      SUSPEND_CONN | DEEPSLEEP_RETENTION_CONN);
+                bls_pm_setWakeupSource(PM_WAKEUP_PAD);
                 slp_log_super_enter(PM_WAKEUP_PAD);
                 ss_stash(SS_FLAG_WAS_SUPER);
                 slp_last_sleep_mode = 0x80;
+                slp_stamp_sleep_32k();
                 ext_flash_deep_power_down();
-                /* 直入 0x80(见 direct_deep_sleep):cpu_sleep_wakeup 的守卫被
-                 * 驱动自身写入副作用误触发(S 同秒必 B,取证已证引脚干净),
-                 * 改为逐条复刻驱动序列并删守卫,调 SDK 公开的 sleep_start。
-                 * 拒睡返回时重开狗 + 记拒绝 → B' 兜底。 */
-                direct_deep_sleep(PM_WAKEUP_PAD | BIT(3));
-                wd_start();
-                slp_log_super_reject(PM_WAKEUP_PAD);
+                analog_write(0x44, 0x0F);
+                int rc = cpu_sleep_wakeup(DEEPSLEEP_MODE, PM_WAKEUP_PAD, 0);
+                if (rc == 0)
+                    slp_log_super_reject(PM_WAKEUP_PAD);
             }
             else if (eb_mode == EB_MODE_LOCK && !ble_get_connected())
             {
-                /* B'(无 Super 时):广播保留+2s 间隔 → retention(~5µA)。
-                 * 栈的唤醒源在此设置(原 LOCK 分支每轮写,现移到只服务 B' 的
-                 * 这里,super 分支不再被 0x26=0x50 反复改写)。 */
+                /* B'(无 Super 时):广播保留+2s 间隔 → retention(~5µA)。 */
                 bls_pm_setWakeupSource(PM_WAKEUP_PAD | PM_WAKEUP_TIMER);
                 slp_log_sleep(1, bls_pm_getSuspendMask());
                 ext_flash_deep_power_down();

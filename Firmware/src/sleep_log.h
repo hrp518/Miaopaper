@@ -29,6 +29,8 @@
 #define SLP_T_PADCFG 9   // 运行时取证:pad 唤醒寄存器原始值(见 slp_log_pad_forensics)
 #define SLP_T_PADPROBE 10 // 运行时取证:逐脚 bisect 定位 0x44[3] 锁存源
 #define SLP_T_WAITGATE 11  // 未睡原因:锁屏+断连却未入睡的门状态(30s 节流)
+#define SLP_T_ELAPSED 12   // 真实断电时长:开机时 32k tick 差值/32768 = 秒
+#define SLP_T_PADLATCH 13  // 单脚稳态诊断:布防单脚→W1C→等500ms→读0x44(bit3 锁存? )
 
 // 在 init_ble 里注册到 BLT_EV_FLAG_SUSPEND_ENTER。SDK 约定 p[0] 是栈即将进入的
 // 睡眠模式(0x00=suspend, 0x07=deep retention 32k)。此回调每次 conn/adv 事件间
@@ -58,6 +60,15 @@ void slp_log_super_reject(uint8_t armed_src);
 void slp_log_pad_forensics(void);
 // 未睡原因记录(内部 30s 节流):flags 门位图见 sleep_log.c 注释
 void slp_log_wait_gate(uint8_t flags, uint8_t epd_busy, uint8_t v26);
+// 单脚稳态 pad 锁存诊断(进 LOCK 后跑一次):见 sleep_log.c
+void slp_log_pad_latch_probe(void);
+// 真实断电时长记录:开机调用(读 0x3a~0x3c 入睡时存的 32k tick,对当前 32k
+// tick 求差)。32k 在深睡期间持续走(POR 不清 0x3a~0x3c),与复位类型无关。
+void slp_log_elapsed(void);
+// 直接返回真实断电秒数(32k 差值;不记日志)。
+uint32_t slp_elapsed_sec(void);
+// 入睡前把当前 32k tick 低 24 位存入 0x3a~0x3c(slp_log_elapsed 读回)。
+void slp_stamp_sleep_32k(void);
 void slp_log_boot(void);            // user_init_normal 末尾调;含复位源取证(b/c)
 void slp_log_lock(uint8_t prev_mode);
 void slp_log_unlock(void);

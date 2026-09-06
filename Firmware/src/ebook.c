@@ -1303,7 +1303,9 @@ void ebook_handle_lock(void)
 	 * - 普通模式(默认):广播保留但间隔拉长到 2s → 栈在广播间隔间走
 	 *   retention(~5µA),手机仍可发现/连接。 */
 	if (settings.super_sleep)
-		ble_set_advertising(0);
+		ble_adv_slow_for_lock();  /* super 也保留广播 —— 官方 ble_sample 实证:
+		                            0x80 从"adv 仍开 + 控制器空闲"状态入睡才可靠
+		                            (mp_sleeptest 实测 8s 消失/按键复现) */
 	else if (settings.ble_enabled)
 		ble_adv_slow_for_lock();
 	{	// Debug: did the lock actually run, and does the panel state allow it?

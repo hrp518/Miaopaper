@@ -180,6 +180,64 @@ void slp_log_wait_gate(uint8_t flags, uint8_t epd_busy, uint8_t v26)
     slp_rec(SLP_T_WAITGATE, flags, epd_busy, v26);
 }
 
+// ---- 真实断电时长测量 ----
+// 0x3a~0x3c 只被 POR 清(手册:看门狗/软件复位均保留),32k tick 在深睡期间
+// 持续走。入睡前存 tick,开机读回求差 → 真实断电秒数,与复位类型无关。
+void slp_stamp_sleep_32k(void)
+{
+    uint32_t tk = get_32k_tick();
+    analog_write(0x3a, (uint8_t)tk);
+    analog_write(0x3b, (uint8_t)(tk >> 8));
+    analog_write(0x3c, (uint8_t)(tk >> 16));
+}
+
+void slp_log_elapsed(void)
+{
+    uint32_t t0 = analog_read(0x3a) | (analog_read(0x3b) << 8) |
+                  (analog_read(0x3c) << 16);
+    uint32_t now = get_32k_tick() & 0xFFFFFF;
+    uint32_t delta = (now - t0) & 0xFFFFFF;   // 32k tick;回绕安全(2^24≈512s 内)
+    slp_rec(SLP_T_ELAPSED, (uint8_t)(delta >> 16),
+            (uint8_t)(delta >> 8), (uint8_t)delta);
+}
+
+// 直接返回真实断电秒数(不记日志)。32k 差值 /32768;t0 无效(全 F)时返回 0。
+uint32_t slp_elapsed_sec(void)
+{
+    uint32_t t0 = analog_read(0x3a) | (analog_read(0x3b) << 8) |
+                  (analog_read(0x3c) << 16);
+    if (t0 == 0xFFFFFFu) return 0;
+    uint32_t delta = ((get_32k_tick() & 0xFFFFFF) - t0) & 0xFFFFFF;
+    return delta / 32768u;
+}
+
+// ---- 单脚稳态 pad 锁存诊断(2026-09-06) ----
+// 逐根布防单脚(W1C→等500ms→读0x44),看静止状态下哪只脚会让 bit3 稳态锁存
+// (数字 gpio_read 全高 ≠ AFE 检测器看到的电平)。a=脚序(0=F/PB4,1=L/PC4,
+// 2=R/PC0),b=0x44(bit3=1 即该脚静止即锁存),c=该脚数字电平。
+// 诊断在第一次进 LOCK 后约 3s 跑一次,跑完恢复三脚全布防。
+void slp_log_pad_latch_probe(void)
+{
+    static const GPIO_PinTypeDef pins[3] = {BTN_FRONT_PIN, BTN_LEFT_PIN, BTN_RIGHT_PIN};
+    for (int i = 0; i < 3; i++) {
+        cpu_set_gpio_wakeup(pins[0], Level_Low, 0);
+        cpu_set_gpio_wakeup(pins[1], Level_Low, 0);
+        cpu_set_gpio_wakeup(pins[2], Level_Low, 0);
+        analog_write(0x44, 0x0F);
+        cpu_set_gpio_wakeup(pins[i], Level_Low, 1);   // 只布防一根
+        analog_write(0x44, 0x0F);
+        WaitMs(500);
+        uint8_t v44 = analog_read(0x44);
+        uint8_t dig = gpio_read(pins[i]) ? 1 : 0;
+        slp_rec(SLP_T_PADLATCH, (uint8_t)i, v44, dig);
+    }
+    /* 恢复三脚全布防 */
+    cpu_set_gpio_wakeup(pins[0], Level_Low, 1);
+    cpu_set_gpio_wakeup(pins[1], Level_Low, 1);
+    cpu_set_gpio_wakeup(pins[2], Level_Low, 1);
+    analog_write(0x44, 0x0F);
+}
+
 // ---- pad 唤醒运行时取证(docs/ENGINEERING_NOTES.md "运行时取证") ----
 // 背景:0x80 入睡前 0x44[3] 恒为 1 → 驱动守卫拒睡并复位(super sleep 从未
 // 睡成)。静态审计(全反汇编)确认唤醒寄存器写入者仅 cpu_wakeup_init/

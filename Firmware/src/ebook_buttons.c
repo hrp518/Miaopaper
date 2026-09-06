@@ -200,10 +200,10 @@ static void btn_reconfig_gpio(void)
         gpio_set_func(pins[i], AS_GPIO);
         gpio_set_output_en(pins[i], 0);
         gpio_set_input_en(pins[i], 1);
-        /* 10K 上拉(原 1M):该模拟电阻深睡期间保留,正是 pad 唤醒的检测上拉。
-         * 1M 太弱,EPD 刷新等耦合噪声易误拉低 → 毛刺误唤醒;10K 抗噪强 100 倍。
-         * 平时按键开路无电流路径,不额外耗电;按下时 3.3V/10K≈0.3mA(瞬态,无妨)。 */
-        gpio_setup_up_down_resistor(pins[i], PM_PIN_PULLUP_10K);
+        /* 03:49 原样(用户指示):F(PB4) FLOAT,L/R 10K */
+        uint8_t pull = (pins[i] == BTN_FRONT_PIN) ? PM_PIN_UP_DOWN_FLOAT
+                                                  : PM_PIN_PULLUP_10K;
+        gpio_setup_up_down_resistor(pins[i], pull);
     }
 }
 
